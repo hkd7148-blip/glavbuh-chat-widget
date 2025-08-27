@@ -29,12 +29,36 @@
     <div id="chat" class="panel"></div>
 
     <form id="form" class="composer">
-      <textarea id="input" rows="2" placeholder="Напишите вопрос по налогам, отчётности, учёту…"></textarea>
-      <button id="send" type="submit">Отправить</button>
-    </form>
-  </div>
+  <input id="file" type="file" accept=".pdf,.docx,.txt" style="max-width:220px">
+  <textarea id="input" rows="2" placeholder="Напишите вопрос по налогам, отчётности, учёту…"></textarea>
+  <button id="send" type="submit">Отправить</button>
+</form>
+<div id="attachInfo" style="font-size:12px;color:#6B7280;margin-top:6px"></div>
 
   <script>
+  let attachmentId = null;
+  const fileEl = document.getElementById('file');
+  const attachInfo = document.getElementById('attachInfo');
+
+  fileEl.addEventListener('change', async () => {
+    const f = fileEl.files[0];
+    if (!f) return;
+    attachInfo.textContent = 'Загрузка…';
+    try {
+      const fd = new FormData();
+      fd.append('file', f);
+      const resp = await fetch('/api/upload', { method: 'POST', body: fd });
+      const data = await resp.json();
+      if (!resp.ok || data.error) throw new Error(data.error || 'Ошибка загрузки');
+
+      attachmentId = data.id;
+      attachInfo.textContent = `Прикреплён: ${data.name} (текст ${data.length} символов)`;
+    } catch (e) {
+      attachmentId = null;
+      attachInfo.textContent = 'Не удалось загрузить файл. Убедитесь, что формат PDF/DOCX/TXT и размер до 10 МБ.';
+      fileEl.value = '';
+    }
+  });
     const chat = document.getElementById('chat');
     const form = document.getElementById('form');
     const input = document.getElementById('input');
@@ -67,8 +91,10 @@
         const resp = await fetch('/api/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ messages: [{ role: 'user', content: q }] })
-        });
+          body: JSON.stringify({ 
+           messages: [{ role: 'user', content: q }],
+           attachmentId
+          })
         if (!resp.ok || !resp.body) throw new Error('No stream');
 
         const reader = resp.body.getReader();
