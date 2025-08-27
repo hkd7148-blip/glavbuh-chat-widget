@@ -308,6 +308,10 @@ app.get('/anon', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'anon.html'));
 });
 
+app.get('/register', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'register.html'));
+});
+
 // === Запуск ===
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
