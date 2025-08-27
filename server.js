@@ -55,39 +55,23 @@ async function extractTextFrom(file) {
     return value || '';
   }
   throw new Error('Неподдерживаемый формат. Разрешены: PDF, DOCX, TXT');
-  function redactPII(text) {
+}
+
+// === Функция маскирования PII ===
+function redactPII(text) {
   if (!text) return '';
   let t = text;
 
-  // Паспорт РФ: серия/номер
   t = t.replace(/\b\d{2}\s?\d{2}\s?\d{6}\b/g, '[скрыто:паспорт]');
-
-  // СНИЛС (XXX-XXX-XXX XX)
   t = t.replace(/\b\d{3}-\d{3}-\d{3}\s?\d{2}\b/g, '[скрыто:СНИЛС]');
-
-  // ИНН (10 или 12 цифр)
-  t = t.replace(/\b\d{10}(\b|[^0-9])|\b\d{12}(\b|[^0-9])/g, m => m.replace(/\d/g,'[x]'));
-
-  // ОГРН (13) / ОГРНИП (15)
+  t = t.replace(/\b\d{10,12}\b/g, '[скрыто:ИНН/СНИЛС]');
   t = t.replace(/\b\d{13}\b/g, '[скрыто:ОГРН]');
   t = t.replace(/\b\d{15}\b/g, '[скрыто:ОГРНИП]');
-
-  // БИК (9 цифр)
   t = t.replace(/\b\d{9}\b/g, '[скрыто:БИК]');
-
-  // Р/счёт, к/счёт, карта (16–20 цифр подряд/с пробелами/дефисами)
   t = t.replace(/\b(?:\d[ -]?){16,20}\b/g, '[скрыто:счёт/карта]');
-
-  // Телефоны
   t = t.replace(/\+?\d[\d\s()-]{7,}\d/g, '[скрыто:тел]');
-
-  // Email
   t = t.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[скрыто:email]');
-
-  // Адреса простейшие (ул., пр-т, д., кв.) — мягкая маска
   t = t.replace(/\b(ул\.|улица|пр-т|проспект|пер\.|переулок|д\.|дом|кв\.|квартира)\s+[^\n,;]+/gi, '[скрыто:адрес]');
-
-  // ФИО (очень грубая эвристика — тройка слов с заглавной)
   t = t.replace(/\b[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+){1,2}\b/g, '[скрыто:ФИО]');
 
   return t;
@@ -97,46 +81,19 @@ async function extractTextFrom(file) {
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'Файл не получен' });
-    // === Маршрут: обезличивание (возвращает TXT для скачивания) ===
-app.post('/api/anon', upload.single('file'), async (req, res) => {
-  try {
-    if (!req.file) return res.status(400).json({ error: 'Файл не получен' });
-
-    // Получаем текст из PDF/DOCX/TXT (у тебя уже есть extractTextFrom)
-    const raw = await extractTextFrom(req.file);
-
-    // Немного нормализации + ограничение длины
-    const trimmed = clampText(raw, 20000);
-
-    // Маскируем
-    const safe = redactPII(trimmed);
-
-    // Отдаём как скачиваемый .txt
-    const base = (req.file.originalname || 'document').replace(/\.[^.]+$/, '');
-    const fname = `${base}-anon.txt`;
-
-    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fname)}"`);
-    return res.send(safe);
-  } catch (e) {
-    return res.status(400).json({ error: String(e.message || e) });
-  }
-});
 
     const raw = await extractTextFrom(req.file);
     const text = clampText(raw, 8000);
 
-    // простая маскировка
     const safe = text
       .replace(/\b\d{10,12}\b/g, '[скрыто]')
       .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[скрыто]')
       .replace(/\+?\d[\d \-()]{7,}\d/g, '[скрыто]');
 
     const id = Math.random().toString(36).slice(2);
-    const ttlMs = 1000 * 60 * 15; // 15 минут
+    const ttlMs = 1000 * 60 * 15;
     attachments.set(id, { text: safe, name: req.file.originalname, expiresAt: Date.now() + ttlMs });
 
-    // Чистим старые
     for (const [key, v] of attachments) {
       if (Date.now() > v.expiresAt) attachments.delete(key);
     }
@@ -268,7 +225,7 @@ app.post('/api/chat', express.json(), async (req, res) => {
           const json = JSON.parse(payload);
           const delta = json.choices?.[0]?.delta?.content;
           if (delta) res.write(`data: ${JSON.stringify({ delta })}\n\n`);
-        } catch { }
+        } catch {}
       }
     }
 
@@ -279,17 +236,39 @@ app.post('/api/chat', express.json(), async (req, res) => {
   }
 });
 
+// === Маршрут: обезличивание ===
+app.post('/api/anon', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'Файл не получен' });
+
+    const raw = await extractTextFrom(req.file);
+    const trimmed = clampText(raw, 20000);
+    const safe = redactPII(trimmed);
+
+    const base = (req.file.originalname || 'document').replace(/\.[^.]+$/, '');
+    const fname = `${base}-anon.txt`;
+
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fname)}"`);
+    return res.send(safe);
+  } catch (e) {
+    return res.status(400).json({ error: String(e.message || e) });
+  }
+});
+
 // === Служебные маршруты ===
 app.get('/health', (req, res) => {
   res.json({ ok: true, time: new Date().toISOString() });
 });
-  app.get('/anon', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'anon.html'));
-});
 
 app.use(express.static(path.join(__dirname, 'public')));
+
 app.get('/widget', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'widget.html'));
+});
+
+app.get('/anon', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'anon.html'));
 });
 
 // === Запуск ===
