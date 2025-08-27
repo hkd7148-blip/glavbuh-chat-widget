@@ -15,6 +15,30 @@ const app = express();
 // === Простейшие аккаунты/токены в памяти (MVP) ===
 const accounts = new Map(); // email -> { expiresAt: number, token: string }
 const tokens   = new Map(); // token -> { email: string, expiresAt: number }
+// === Проверка токена (MVP) ===
+// tokens: Map<token, { email, expiresAt }>
+function getTokenInfo(token='') {
+  if (!token) return null;
+  const rec = tokens.get(token);
+  if (!rec) return null;
+  if (Date.now() > rec.expiresAt) return null;
+  return rec;
+}
+
+// middleware: доступ обязателен
+function authRequired(req, res, next) {
+  const token = req.headers['x-gb-token'] || '';
+  const info = getTokenInfo(String(token));
+  if (!info) {
+    return res.status(401).json({
+      error: 'auth_required',
+      message: 'Доступ к онлайн-помощнику только после регистрации или продления.'
+    });
+  }
+  // можно пробросить email дальше
+  req.user = { email: info.email, expiresAt: info.expiresAt };
+  next();
+}
 
 function isValidEmail(e='') {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e.toLowerCase());
@@ -89,6 +113,9 @@ function redactPII(text) {
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'Файл не получен' });
+    app.post('/api/upload', authRequired, upload.single('file'), async (req, res) => {
+  // ...как было...
+});
 
     const raw = await extractTextFrom(req.file);
     const text = clampText(raw, 8000);
@@ -119,6 +146,9 @@ app.post('/api/chat', express.json(), async (req, res) => {
     if (!Array.isArray(messages)) {
       return res.status(400).json({ error: 'messages must be an array' });
     }
+app.post('/api/chat', authRequired, express.json(), async (req, res) => {
+  // ...весь код как был...
+});
 
     let attachmentNote = '';
     if (attachmentId && attachments.has(attachmentId)) {
