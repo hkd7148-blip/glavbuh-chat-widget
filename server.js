@@ -148,4 +148,73 @@ app.post('/api/chat', express.json(), async (req, res) => {
     res.end();
   }
 });
+import multer from 'multer';
+import pdf from 'pdf-parse';
+import mammoth from 'mammoth';
+
+// Хранилище «во временной памяти»: id -> { text, name, expiresAt }
+const attachments = new Map();
+
+// Multer: принимаем один файл, до ~10 МБ
+const upload = multer({
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+});
+
+// Вспомогательная функция: аккуратно обрезать текст
+function clampText(s, max = 8000) {
+  if (!s) return '';
+  s = s.replace(/\r/g, '');
+  // чуть чистим пробелы
+  s = s.replace(/[ \t]+\n/g, '\n').trim();
+  return s.length > max ? s.slice(0, max) + '\n...[обрезано]...' : s;
+}
+
+// Извлечь текст в зависимости от типа файла
+async function extractTextFrom(file) {
+  const name = (file.originalname || '').toLowerCase();
+  if (name.endsWith('.txt')) {
+    return file.buffer.toString('utf8');
+  }
+  if (name.endsWith('.pdf')) {
+    const data = await pdf(file.buffer);
+    return data.text || '';
+  }
+  if (name.endsWith('.docx')) {
+    const { value } = await mammoth.extractRawText({ buffer: file.buffer });
+    return value || '';
+  }
+  throw new Error('Неподдерживаемый формат. Разрешены: PDF, DOCX, TXT');
+}
+
+// Загрузка файла: возвращаем attachmentId
+app.post('/api/upload', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'Файл не получен' });
+    const raw = await extractTextFrom(req.file);
+    const text = clampText(raw, 8000); // ограничим, чтобы не переполнить промпт
+
+    // простая защита: выкидываем явные ИНН/тел/емейлы, если вдруг остались
+    const safe = text
+      .replace(/\b\d{10,12}\b/g, '[скрыто]')            // ИНН/СНИЛС-сходные куски
+      .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[скрыто]')
+      .replace(/\+?\d[\d \-()]{7,}\d/g, '[скрыто]');
+
+    const id = Math.random().toString(36).slice(2);
+    const ttlMs = 1000 * 60 * 15; // 15 минут жизни
+    attachments.set(id, { text: safe, name: req.file.originalname, expiresAt: Date.now() + ttlMs });
+
+    // Чистим протухшие
+    for (const [key, v] of attachments) {
+      if (Date.now() > v.expiresAt) attachments.delete(key);
+    }
+
+    return res.json({
+      id,
+      name: req.file.originalname,
+      length: safe.length
+    });
+  } catch (e) {
+    return res.status(400).json({ error: String(e.message || e) });
+  }
+});
 app.listen(PORT, () => console.log("Running on :" + PORT));
