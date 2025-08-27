@@ -1,36 +1,104 @@
 import 'dotenv/config';
-import express from "express";
-import path from "path";
-import { fileURLToPath } from "url";
+import express from 'express';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import multer from 'multer';
+import mammoth from 'mammoth';
+// PDF: pdfjs-dist для извлечения текста
+import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-app.get("/health", (req, res) => {
-  res.json({ ok: true, time: new Date().toISOString() });
+// === Хранилище вложений (в памяти) ===
+const attachments = new Map();
+
+// Настройка загрузки файлов (до 10 МБ)
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }
 });
 
-app.use(express.static(path.join(__dirname, "public")));
-app.get("/widget", (req, res) => {
-  res.sendFile(path.join(__dirname, "public", "widget.html"));
+// === Вспомогательные функции ===
+function clampText(s, max = 8000) {
+  if (!s) return '';
+  s = s.replace(/\r/g, '');
+  s = s.replace(/[ \t]+\n/g, '\n').trim();
+  return s.length > max ? s.slice(0, max) + '\n...[обрезано]...' : s;
+}
+
+async function extractPdfText(buffer) {
+  const loadingTask = pdfjs.getDocument({ data: buffer });
+  const pdf = await loadingTask.promise;
+  let out = '';
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
+    const content = await page.getTextContent();
+    const text = content.items.map(it => (it.str || '')).join(' ');
+    out += text + '\n';
+  }
+  return out;
+}
+
+async function extractTextFrom(file) {
+  const name = (file.originalname || '').toLowerCase();
+  if (name.endsWith('.txt')) {
+    return file.buffer.toString('utf8');
+  }
+  if (name.endsWith('.pdf')) {
+    return await extractPdfText(file.buffer);
+  }
+  if (name.endsWith('.docx')) {
+    const { value } = await mammoth.extractRawText({ buffer: file.buffer });
+    return value || '';
+  }
+  throw new Error('Неподдерживаемый формат. Разрешены: PDF, DOCX, TXT');
+}
+
+// === Маршрут: загрузка файла ===
+app.post('/api/upload', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'Файл не получен' });
+
+    const raw = await extractTextFrom(req.file);
+    const text = clampText(raw, 8000);
+
+    // простая маскировка
+    const safe = text
+      .replace(/\b\d{10,12}\b/g, '[скрыто]')
+      .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[скрыто]')
+      .replace(/\+?\d[\d \-()]{7,}\d/g, '[скрыто]');
+
+    const id = Math.random().toString(36).slice(2);
+    const ttlMs = 1000 * 60 * 15; // 15 минут
+    attachments.set(id, { text: safe, name: req.file.originalname, expiresAt: Date.now() + ttlMs });
+
+    // Чистим старые
+    for (const [key, v] of attachments) {
+      if (Date.now() > v.expiresAt) attachments.delete(key);
+    }
+
+    return res.json({ id, name: req.file.originalname, length: safe.length });
+  } catch (e) {
+    return res.status(400).json({ error: String(e.message || e) });
+  }
 });
 
-const PORT = process.env.PORT || 3000;
-// Принимаем вопрос и стримим ответ модели
+// === Маршрут: чат ===
 app.post('/api/chat', express.json(), async (req, res) => {
   try {
     const { messages, attachmentId } = req.body || {};
-// ...
-let attachmentNote = '';
-if (attachmentId && attachments.has(attachmentId)) {
-  const a = attachments.get(attachmentId);
-  attachmentNote = `\n\nВложенный текст (обезличенный, до 8k):\n${a.text}`;
-};
     if (!Array.isArray(messages)) {
       return res.status(400).json({ error: 'messages must be an array' });
     }
 
-    // Базовая инструкция помощнику (можно потом усилить)
+    let attachmentNote = '';
+    if (attachmentId && attachments.has(attachmentId)) {
+      const a = attachments.get(attachmentId);
+      attachmentNote = `\n\nВложенный текст (обезличенный, до 8k):\n${a.text}`;
+    }
     const systemPrompt = `Ты — онлайн-помощник главного бухгалтера для РФ. Отвечай кратко и по делу, по-русски.
 Если вопрос требует персональных данных — попроси обезличить и предложи инструмент /anonimize/.1. Назначение чат-бота
 Чат-бот — интеллектуальный помощник, созданный для поддержки главных бухгалтеров и сотрудников бухгалтерии. Он предоставляет консультации по вопросам налогообложения, учета и законодательства.
@@ -96,7 +164,6 @@ if (attachmentId && attachments.has(attachmentId)) {
       max_tokens: 700
     };
 
-    // Заголовки для Server-Sent Events
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('X-Accel-Buffering', 'no');
@@ -117,7 +184,6 @@ if (attachmentId && attachments.has(attachmentId)) {
       return res.end();
     }
 
-    // Читаем поток OpenAI и проксируем только текстовые дельты
     const reader = upstream.body.getReader();
     const decoder = new TextDecoder('utf-8');
     let buf = '';
@@ -141,9 +207,7 @@ if (attachmentId && attachments.has(attachmentId)) {
           const json = JSON.parse(payload);
           const delta = json.choices?.[0]?.delta?.content;
           if (delta) res.write(`data: ${JSON.stringify({ delta })}\n\n`);
-        } catch {
-          // пропускаем служебные чанки
-        }
+        } catch { }
       }
     }
 
@@ -153,73 +217,16 @@ if (attachmentId && attachments.has(attachmentId)) {
     res.end();
   }
 });
-import multer from 'multer';
-import pdf from 'pdf-parse';
-import mammoth from 'mammoth';
 
-// Хранилище «во временной памяти»: id -> { text, name, expiresAt }
-const attachments = new Map();
-
-// Multer: принимаем один файл, до ~10 МБ
-const upload = multer({
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+// === Служебные маршруты ===
+app.get('/health', (req, res) => {
+  res.json({ ok: true, time: new Date().toISOString() });
 });
 
-// Вспомогательная функция: аккуратно обрезать текст
-function clampText(s, max = 8000) {
-  if (!s) return '';
-  s = s.replace(/\r/g, '');
-  // чуть чистим пробелы
-  s = s.replace(/[ \t]+\n/g, '\n').trim();
-  return s.length > max ? s.slice(0, max) + '\n...[обрезано]...' : s;
-}
+app.use(express.static(path.join(__dirname, 'public')));
 
-// Извлечь текст в зависимости от типа файла
-async function extractTextFrom(file) {
-  const name = (file.originalname || '').toLowerCase();
-  if (name.endsWith('.txt')) {
-    return file.buffer.toString('utf8');
-  }
-  if (name.endsWith('.pdf')) {
-    const data = await pdf(file.buffer);
-    return data.text || '';
-  }
-  if (name.endsWith('.docx')) {
-    const { value } = await mammoth.extractRawText({ buffer: file.buffer });
-    return value || '';
-  }
-  throw new Error('Неподдерживаемый формат. Разрешены: PDF, DOCX, TXT');
-}
-
-// Загрузка файла: возвращаем attachmentId
-app.post('/api/upload', upload.single('file'), async (req, res) => {
-  try {
-    if (!req.file) return res.status(400).json({ error: 'Файл не получен' });
-    const raw = await extractTextFrom(req.file);
-    const text = clampText(raw, 8000); // ограничим, чтобы не переполнить промпт
-
-    // простая защита: выкидываем явные ИНН/тел/емейлы, если вдруг остались
-    const safe = text
-      .replace(/\b\d{10,12}\b/g, '[скрыто]')            // ИНН/СНИЛС-сходные куски
-      .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[скрыто]')
-      .replace(/\+?\d[\d \-()]{7,}\d/g, '[скрыто]');
-
-    const id = Math.random().toString(36).slice(2);
-    const ttlMs = 1000 * 60 * 15; // 15 минут жизни
-    attachments.set(id, { text: safe, name: req.file.originalname, expiresAt: Date.now() + ttlMs });
-
-    // Чистим протухшие
-    for (const [key, v] of attachments) {
-      if (Date.now() > v.expiresAt) attachments.delete(key);
-    }
-
-    return res.json({
-      id,
-      name: req.file.originalname,
-      length: safe.length
-    });
-  } catch (e) {
-    return res.status(400).json({ error: String(e.message || e) });
-  }
+// === Запуск ===
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log('Server running on', PORT);
 });
-app.listen(PORT, () => console.log("Running on :" + PORT));
