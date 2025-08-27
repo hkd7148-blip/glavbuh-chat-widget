@@ -224,6 +224,9 @@ app.get('/health', (req, res) => {
 });
 
 app.use(express.static(path.join(__dirname, 'public')));
+app.get('/widget', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'widget.html'));
+});
 
 // === Запуск ===
 const PORT = process.env.PORT || 3000;
