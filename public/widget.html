@@ -47,8 +47,13 @@
     try {
       const fd = new FormData();
       fd.append('file', f);
-      const resp = await fetch('/api/upload', { method: 'POST', body: fd });
-      const data = await resp.json();
+      const token = localStorage.getItem('gb_token') || '';
+const resp = await fetch('/api/upload', {
+  method: 'POST',
+  headers: { 'x-gb-token': token },
+  body: fd
+});
+  const data = await resp.json();
       if (!resp.ok || data.error) throw new Error(data.error || 'Ошибка загрузки');
 
       attachmentId = data.id;
