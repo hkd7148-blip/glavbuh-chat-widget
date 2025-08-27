@@ -283,6 +283,9 @@ app.post('/api/chat', express.json(), async (req, res) => {
 app.get('/health', (req, res) => {
   res.json({ ok: true, time: new Date().toISOString() });
 });
+  app.get('/anon', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'anon.html'));
+});
 
 app.use(express.static(path.join(__dirname, 'public')));
 app.get('/widget', (req, res) => {
