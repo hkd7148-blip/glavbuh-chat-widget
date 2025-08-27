@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Регистрация — Ваш ГлавБух</title>
+  <style>
+    body{margin:0;background:#f7f8fb;font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Arial;color:#111827}
+    .wrap{max-width:640px;margin:0 auto;padding:20px}
+    h1{font-size:20px;margin:0 0 6px;color:#1E3A8A}
+    .note{font-size:13px;color:#6B7280;margin:0 0 12px}
+    .card{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:16px}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    input[type=email]{flex:1;min-width:220px;padding:10px;border:1px solid #e5e7eb;border-radius:10px}
+    button{padding:10px 16px;border:0;border-radius:10px;background:#10B981;color:#fff;font-weight:700;cursor:pointer}
+    .msg{margin-top:10px;font-size:13px}
+    .ok{color:#065f46}
+    .err{color:#b91c1c}
+    a{color:#0ea5a5;text-decoration:none}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Регистрация</h1>
+    <div class="note">После регистрации вы получите <b>1 день бесплатного доступа</b> к ИИ-консультанту. Затем можно выбрать тариф.</div>
+
+    <div class="card">
+      <div class="row">
+        <input id="email" type="email" placeholder="you@example.com" required>
+        <button id="go">Получить доступ</button>
+      </div>
+      <div id="msg" class="msg"></div>
+      <div class="msg">Уже есть доступ? Перейдите к <a href="/widget" target="_blank">чату</a>.</div>
+    </div>
+  </div>
+
+  <script>
+    const emailEl = document.getElementById('email');
+    const goBtn = document.getElementById('go');
+    const msgEl = document.getElementById('msg');
+
+    goBtn.addEventListener('click', async () => {
+      const email = (emailEl.value || '').trim();
+      if (!email) {
+        msgEl.textContent = 'Введите e-mail';
+        msgEl.className = 'msg err';
+        return;
+      }
+      msgEl.textContent = 'Отправляем...';
+      msgEl.className = 'msg';
+
+      try {
+        const resp = await fetch('/api/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email })
+        });
+        const data = await resp.json();
+        if (!resp.ok || data.error) throw new Error(data.error || 'Ошибка');
+
+        // Сохраняем токен в localStorage (MVP)
+        localStorage.setItem('gb_token', data.token);
+        localStorage.setItem('gb_email', data.email);
+        localStorage.setItem('gb_expires', String(data.expiresAt));
+
+        msgEl.innerHTML = 'Готово! Доступ активирован на 1 день.<br>Можно открыть <a href="/widget" target="_blank">чат</a>.';
+        msgEl.className = 'msg ok';
+      } catch (e) {
+        msgEl.textContent = 'Ошибка: ' + e.message;
+        msgEl.className = 'msg err';
+      }
+    });
+  </script>
+</body>
+</html>
