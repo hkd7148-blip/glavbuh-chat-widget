@@ -12,6 +12,14 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 
+// === Простейшие аккаунты/токены в памяти (MVP) ===
+const accounts = new Map(); // email -> { expiresAt: number, token: string }
+const tokens   = new Map(); // token -> { email: string, expiresAt: number }
+
+function isValidEmail(e='') {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e.toLowerCase());
+}
+
 // === Хранилище вложений (в памяти) ===
 const attachments = new Map();
 
@@ -255,6 +263,35 @@ app.post('/api/anon', upload.single('file'), async (req, res) => {
     return res.status(400).json({ error: String(e.message || e) });
   }
 });
+// === Регистрация: выдаём 1 день trial и токен ===
+app.post('/api/register', express.json(), (req, res) => {
+  try {
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ error: 'Укажите корректный e-mail' });
+    }
+
+    // 1 день тест-доступа
+    const ttlMs = 1000 * 60 * 60 * 24;
+    const expiresAt = Date.now() + ttlMs;
+
+    // Генерим токен
+    const token = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+
+    // Сохраняем в память (MVP)
+    accounts.set(email, { expiresAt, token });
+    tokens.set(token, { email, expiresAt });
+
+    // Чистим протухшие
+    for (const [t, v] of tokens) if (Date.now() > v.expiresAt) tokens.delete(t);
+    for (const [e, v] of accounts) if (Date.now() > v.expiresAt) accounts.delete(e);
+
+    return res.json({ ok: true, email, token, expiresAt });
+  } catch (e) {
+    return res.status(400).json({ error: String(e.message || e) });
+  }
+});
+
 
 // === Служебные маршруты ===
 app.get('/health', (req, res) => {
