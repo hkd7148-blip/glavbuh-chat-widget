@@ -10,20 +10,96 @@
     .title{font-weight:700;font-size:18px;color:#1E3A8A}
     .note{font-size:13px;color:#6B7280;margin:6px 0 12px}
     .note a{color:#0ea5a5;text-decoration:none}
-    .panel{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:14px;min-height:60vh;display:flex;align-items:center;justify-content:center;text-align:center}
-    .btn{display:inline-block;padding:10px 16px;border-radius:10px;background:#10B981;color:#fff;text-decoration:none;font-weight:700}
+    .panel{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:14px;height:62vh;overflow:auto}
+    .composer{display:flex;gap:10px;margin-top:10px}
+    textarea{flex:1;resize:vertical;border:1px solid #e5e7eb;border-radius:10px;padding:10px;font:inherit}
+    button{padding:10px 16px;border:0;border-radius:10px;background:#10B981;color:#fff;font-weight:700;cursor:pointer}
+    button:disabled{opacity:.6;cursor:default}
+    .msg{display:flex;gap:10px;margin-bottom:10px}
+    .bubble{max-width:76%;padding:10px 12px;border-radius:12px;border:1px solid #e5e7eb;background:#fff}
+    .me .bubble{background:#DCFCE7;border-color:#86EFAC;margin-left:auto}
+    .ai .bubble{background:#fff}
   </style>
 </head>
 <body>
   <div class="wrap">
     <div class="title">Ваш ГлавБух — онлайн помощник 24/7</div>
     <div class="note">🔒 Не отправляйте персональные данные. Для защиты используйте <a href="/anonimize/" target="_blank">обезличиватель</a>.</div>
-    <div class="panel">
-      <div>
-        <p>Здесь будет рабочий чат-помощник. На следующем этапе мы подключим ИИ-ответы через API.</p>
-        <p style="margin-top:10px"><span class="btn">Скоро будет доступно</span></p>
-      </div>
-    </div>
+
+    <div id="chat" class="panel"></div>
+
+    <form id="form" class="composer">
+      <textarea id="input" rows="2" placeholder="Напишите вопрос по налогам, отчётности, учёту…"></textarea>
+      <button id="send" type="submit">Отправить</button>
+    </form>
   </div>
+
+  <script>
+    const chat = document.getElementById('chat');
+    const form = document.getElementById('form');
+    const input = document.getElementById('input');
+    const sendBtn = document.getElementById('send');
+
+    function add(role, text) {
+      const row = document.createElement('div');
+      row.className = 'msg ' + (role === 'user' ? 'me' : 'ai');
+      const b = document.createElement('div');
+      b.className = 'bubble';
+      b.textContent = text;
+      row.appendChild(b);
+      chat.appendChild(row);
+      chat.scrollTop = chat.scrollHeight;
+      return b;
+    }
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const q = (input.value || '').trim();
+      if (!q) return;
+
+      add('user', q);
+      input.value = '';
+      sendBtn.disabled = true;
+
+      const a = add('assistant', '…');
+
+      try {
+        const resp = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messages: [{ role: 'user', content: q }] })
+        });
+        if (!resp.ok || !resp.body) throw new Error('No stream');
+
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let acc = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const chunk = decoder.decode(value, { stream: true });
+          const parts = (acc + chunk).split('\n\n');
+          acc = parts.pop() || '';
+          for (const p of parts) {
+            const line = p.trim();
+            if (!line.startsWith('data:')) continue;
+            const json = line.slice(5).trim();
+            try {
+              const { delta, done, error } = JSON.parse(json);
+              if (error) { a.textContent = 'Перегрузка или ошибка. Попробуйте ещё раз.'; break; }
+              if (done) break;
+              if (delta) a.textContent += delta;
+            } catch {}
+          }
+          chat.scrollTop = chat.scrollHeight;
+        }
+      } catch (err) {
+        a.textContent = 'Ошибка соединения. Повторите попытку позже.';
+      } finally {
+        sendBtn.disabled = false;
+      }
+    });
+  </script>
 </body>
 </html>
