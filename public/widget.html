@@ -86,6 +86,15 @@
       sendBtn.disabled = true;
 
       const a = add('assistant', '…');
+const token = localStorage.getItem('gb_token') || '';
+const resp = await fetch('/api/chat', {
+  method: 'POST',
+  headers: { 
+    'Content-Type': 'application/json',
+    'x-gb-token': token   // <-- добавили токен в заголовок (на следующем шаге начнем проверять)
+  },
+  body: JSON.stringify({ messages: [{ role: 'user', content: q }], attachmentId })
+});
 
       try {
         const resp = await fetch('/api/chat', {
