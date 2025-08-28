@@ -774,6 +774,7 @@ app.post('/api/chat_plus', authRequired, express.json(), async (req, res) => {
     return sendSSEError(error, 'critical_error');
   }
 });
+try {
     // Простая версия без ансамбля - используем один запрос
     const result = await callOpenAIOnce({
       model,
