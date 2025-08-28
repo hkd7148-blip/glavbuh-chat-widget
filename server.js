@@ -30,7 +30,11 @@ function clampText(s, max = 8000) {
   s = s.replace(/[ \t]+\n/g, '\n').trim();
   return s.length > max ? s.slice(0, max) + '\n...[обрезано]...' : s;
 }
-
+function getCookie(req, name) {
+  const h = req.headers.cookie || '';
+  const m = h.match(new RegExp('(?:^|; )' + name.replace(/[-[\]/{}()*+?.\\^$|]/g, '\\$&') + '=([^;]*)'));
+  return m ? decodeURIComponent(m[1]) : '';
+}
 async function extractPdfText(buffer) {
   const loadingTask = pdfjs.getDocument({ data: buffer });
   const pdf = await loadingTask.promise;
@@ -370,6 +374,36 @@ app.get('/health', (req, res) => {
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/widget', (req, res) => {
+  // Проверяем токен в cookie (HttpOnly тут не обязателен, мы ставим обычную cookie)
+  const token = getCookie(req, 'gb_token');
+  const info = token ? tokens.get(token) : null;
+  const valid = info && Date.now() < info.expiresAt;
+
+  if (!valid) {
+    // Нет доступа — показываем простую заглушку
+    return res.send(`
+      <!doctype html>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <title>Доступ к чату</title>
+      <style>
+        body{margin:0;background:#f7f8fb;font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Arial;color:#111827}
+        .wrap{max-width:640px;margin:0 auto;padding:24px}
+        .card{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:16px}
+        a.button{display:inline-block;padding:10px 16px;border-radius:10px;background:#10B981;color:#fff;text-decoration:none;font-weight:700}
+        .muted{font-size:13px;color:#6B7280}
+      </style>
+      <div class="wrap">
+        <div class="card">
+          <h1 style="margin:0 0 6px;color:#1E3A8A;font-size:20px">Доступ только для зарегистрированных</h1>
+          <p class="muted">Чтобы открыть чат онлайн-помощника, пройдите регистрацию и подтвердите e-mail. Это займёт минуту.</p>
+          <p><a class="button" href="/register">Зарегистрироваться</a></p>
+        </div>
+      </div>
+    `);
+  }
+
+  // Доступ есть — отдаём виджет
   res.sendFile(path.join(__dirname, 'public', 'widget.html'));
 });
 app.get('/anon', (req, res) => {
