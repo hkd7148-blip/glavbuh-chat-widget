@@ -24,7 +24,6 @@ const upload = multer({
 });
 
 /* ================== УТИЛИТЫ ================== */
-// ========= Ансамбль: утилиты =========
 
 // Конфигурация по умолчанию
 const DEFAULT_CONFIG = {
@@ -236,7 +235,7 @@ async function callOpenAIOnce({
   return await withRetry(makeRequest);
 }
 
-// Улучшенная функция стриминга SSE
+// ИСПРАВЛЕННАЯ функция стриминга SSE (убран await из обычной функции)
 function sseStreamText(res, text, chunkSize = DEFAULT_CONFIG.CHUNK_SIZE) {
   if (!res || typeof res.write !== 'function') {
     throw new Error('Некорректный объект response');
@@ -272,7 +271,7 @@ function sseStreamText(res, text, chunkSize = DEFAULT_CONFIG.CHUNK_SIZE) {
       chunkSize 
     })}\n\n`);
     
-    // Отправляем текст порциями
+    // Отправляем текст порциями (БЕЗ await!)
     for (let i = 0; i < text.length; i += chunkSize) {
       const chunk = text.slice(i, i + chunkSize);
       totalSent += chunk.length;
@@ -287,12 +286,9 @@ function sseStreamText(res, text, chunkSize = DEFAULT_CONFIG.CHUNK_SIZE) {
         totalSent
       })}\n\n`);
       
-      // Небольшая задержка для имитации потока
+      // Убираем await и используем обычный setTimeout для задержки
       if (i + chunkSize < text.length) {
-        async function sseStreamText(res, text) { // ✅ добавить async
-  // ... код ...
-  await new Promise(resolve => setTimeout(resolve, 10));
-}
+        // Синхронная задержка не нужна для SSE
       }
     }
     
@@ -348,28 +344,20 @@ const logger = {
   }
 };
 
-// Экспорт всех функций
-module.exports = {
-  withTimeout,
-  withRetry,
-  callOpenAIOnce,
-  sseStreamText,
-  validateOpenAIParams,
-  safeStringify,
-  logger,
-  DEFAULT_CONFIG
-};
+// Вспомогательные функции
 function clampText(s, max = 8000) {
   if (!s) return '';
   s = s.replace(/\r/g, '');
   s = s.replace(/[ \t]+\n/g, '\n').trim();
   return s.length > max ? s.slice(0, max) + '\n...[обрезано]...' : s;
 }
+
 function getCookie(req, name) {
   const h = req.headers.cookie || '';
   const m = h.match(new RegExp('(?:^|; )' + name.replace(/[-[\]/{}()*+?.\\^$|]/g, '\\$&') + '=([^;]*)'));
   return m ? decodeURIComponent(m[1]) : '';
 }
+
 async function extractPdfText(buffer) {
   const loadingTask = pdfjs.getDocument({ data: buffer });
   const pdf = await loadingTask.promise;
@@ -414,9 +402,11 @@ function redactPII(text) {
 function genCode() {
   return String(Math.floor(100000 + Math.random() * 900000));
 }
+
 function isValidEmail(e = '') {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e.toLowerCase());
 }
+
 function isValidPhone(p = '') {
   const digits = (p.match(/\d/g) || []).length;
   return digits >= 10 && digits <= 15;
@@ -449,6 +439,7 @@ function getTokenInfo(token = '') {
   if (Date.now() > rec.expiresAt) return null;
   return rec;
 }
+
 function authRequired(req, res, next) {
   const token = req.headers['x-gb-token'] || '';
   const info = getTokenInfo(String(token));
@@ -488,314 +479,7 @@ app.post('/api/upload', authRequired, upload.single('file'), async (req, res) =>
 });
 
 /* ================== API: ЧАТ ================== */
-// ========= Ансамбль: две версии + агрегатор =========
-app.post('/api/chat_plus', authRequired, express.json(), async (req, res) => {
-  let headersSent = false;
-  
-  // Утилита для безопасной отправки SSE заголовков
-  const ensureSSEHeaders = () => {
-    if (!headersSent) {
-      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-      res.setHeader('Cache-Control', 'no-cache, no-transform');
-      res.setHeader('Connection', 'keep-alive');
-      res.setHeader('X-Accel-Buffering', 'no');
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      res.flushHeaders?.();
-      headersSent = true;
-    }
-  };
-  
-  // Утилита для отправки SSE ошибки
-  const sendSSEError = (error, code = 'ensemble_error') => {
-    try {
-      ensureSSEHeaders();
-      res.write(`data: ${JSON.stringify({ 
-        type: 'error',
-        error: code, 
-        message: String(error?.message || error),
-        timestamp: new Date().toISOString()
-      })}\n\n`);
-      res.end();
-    } catch (writeError) {
-      console.error('Ошибка отправки SSE error:', writeError);
-      if (!res.headersSent) {
-        res.status(500).json({ error: code, message: String(error?.message || error) });
-      }
-    }
-  };
-
-  try {
-    const { messages, attachmentId } = req.body || {};
-    
-    // Валидация входных данных
-    if (!Array.isArray(messages) || messages.length === 0) {
-      return sendSSEError(new Error('messages должен быть непустым массивом'), 'invalid_input');
-    }
-
-    // Проверяем структуру сообщений
-    for (const msg of messages) {
-      if (!msg.role || !msg.content || typeof msg.content !== 'string') {
-        return sendSSEError(new Error('Каждое сообщение должно содержать role и content'), 'invalid_message');
-      }
-    }
-
-    // Контекст вложения (как в обычном /api/chat)
-    let attachmentNote = '';
-    if (attachmentId && attachments.has(attachmentId)) {
-      const attachment = attachments.get(attachmentId);
-      const truncatedText = attachment.text.length > 8000 
-        ? attachment.text.slice(0, 8000) + '...[обрезано]'
-        : attachment.text;
-      attachmentNote = `\n\nВложенный текст (обезличенный, до 8k):\n${truncatedText}`;
-    }
-
-    // Конфигурация из переменных окружения
-    const config = {
-      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
-      timeout: Number(process.env.ENSEMBLE_TIMEOUT_MS || 15000), // увеличил до 15с
-      aggTokens: Number(process.env.ENSEMBLE_AGG_TOKENS || 1000),
-      fallbackTimeout: Number(process.env.FALLBACK_TIMEOUT_MS || 10000)
-    };
-
-    // Базовый системный промпт
-    const baseSystem = `Ты — онлайн-помощник главного бухгалтера для РФ. Отвечай кратко и по делу, по-русски.
-Если вопрос требует персональных данных — попроси обезличить и предложи инструмент /anonimize/.1. Назначение чат-бота
-Чат-бот — интеллектуальный помощник, созданный для поддержки главных бухгалтеров и сотрудников бухгалтерии. Он предоставляет консультации по вопросам налогообложения, учета и законодательства.
-Чат-бот помогает:
-Разъяснять требования законодательства;
-Подсказывать порядок заполнения отчетности;
-Выполнять расчеты (налоги, взносы, проценты);
-Отвечать на вопросы по проводкам, НДС, УСН, учету доходов и расходов.
-Он не интегрируется с бухгалтерскими программами (1С, SAP), базами данных и порталами ФНС, ПФР и др.
-2. Возможности чат-бота
-Консультации по законодательству — налоги, сборы, сроки сдачи, изменения в законах.
-Помощь с расчетами — налоги, взносы, штрафы и пени на основе введённых данных.
-Подсказки по отчетности — формы (НДС, 3-НДФЛ, отчеты в ФСС).
-Разъяснение терминов — бухгалтерские термины и учетные процедуры.
-Примеры проводок — типовые бухгалтерские проводки.
-Актуальность — обновление информации (по состоянию на 30 июля 2025 года).
-2. Формат общения:
-Пишите на русском в свободной форме. Примеры:
-«Как рассчитать НДС с аванса?»
-«Срок сдачи декларации по УСН за 2025 год?»
-«Проводки по аренде помещения».
-3. Ввод данных для расчетов:
-Указывайте точные параметры (доход, ставка налога, период).
-Пример: «Налог на прибыль при доходе 1 200 000 руб. и расходах 800 000 руб.»
-4. Рекомендации
-Формулируйте запросы чётко (указывайте тип организации, налоговый режим).
-Уточняйте актуальность, если речь о законодательстве.
-Не передавайте ИНН, паспортные данные или конфиденциальную информацию.
-5. Ограничения
-Нет интеграции с программами или порталами.
-Рекомендательный характер ответов — бот не несёт ответственности за принятые решения.
-Не решает сложные задачи — аудит и т.п.
-Язык общения — русский.
-6. Примеры сценариев
-Вопрос о сроках
-Пользователь: «Когда сдавать 6-НДФЛ в 2025 году?»
-Бот: «1 кв. — до 25.04.2025, полугодие — до 25.07.2025, 9 мес. — до 25.10.2025, за год — до 25.02.2026».
-Расчет налога
-Пользователь: «Рассчитай УСН 6% при доходе 500 000 руб.»
-Бот: «Налог = 30 000 руб. Возможно уменьшение на взносы».
-Проводки
-Пользователь: «Начисление зарплаты»
-Бот:
-Дт 20 (26, 44) Кт 70 — начислена зарплата
-Дт 70 Кт 68 — удержан НДФЛ
-Дт 20 (26, 44) Кт 69 — начислены взносы
-7. Техническая поддержка
-Если бот не понимает запрос — переформулируйте.
-При необходимости обратитесь в поддержку через сайт или email.
-8. Заключение
-Чат-бот — удобный инструмент для быстрого решения типовых задач главного бухгалтера. Он экономит время. Используй вложенный текст ниже как контекст, если он релевантен.${attachmentNote}`;
-
-    // Две специализированные роли для ансамбля
-    const roleA = {
-      name: 'Нормативно-правовой',
-      system: `${baseSystem}
-
-РОЛЬ: Нормативно-правовой консультант
-ФОКУС: Точность формулировок, ссылки на НК РФ/ПБУ/ФЗ/письма ФНС (где уместно), корректность терминологии, формулы расчётов.
-СТИЛЬ: Структурированный, с опорой на нормативную базу.`,
-      temperature: 0.2
-    };
-
-    const roleB = {
-      name: 'Практико-прикладной',
-      system: `${baseSystem}
-
-РОЛЬ: Практический консультант
-ФОКУС: Реальные кейсы, типичные ошибки, "подводные камни", рекомендации по документообороту, учётная политика, процедуры.
-СТИЛЬ: Практический, с примерами и чек-листами.`,
-      temperature: 0.4
-    };
-
-    // Отправляем начальный статус
-    ensureSSEHeaders();
-    res.write(`data: ${JSON.stringify({ 
-      type: 'status',
-      message: 'Запускаем ансамбль экспертов...',
-      stage: 'init'
-    })}\n\n`);
-
-    // Готовим два параллельных запроса
-    const createRequest = (role) => callOpenAIOnce({
-      model: config.model,
-      temperature: role.temperature,
-      max_tokens: 700,
-      timeout: config.timeout,
-      messages: [
-        { role: 'system', content: role.system },
-        ...messages
-      ]
-    });
-
-    const requestA = createRequest(roleA);
-    const requestB = createRequest(roleB);
-
-    // Выполняем запросы параллельно с таймаутом
-    const [resultA, resultB] = await Promise.all([
-      withTimeout(requestA, config.timeout, 'A'),
-      withTimeout(requestB, config.timeout, 'B')
-    ]);
-
-    // Собираем успешные ответы
-    const validParts = [];
-    const errors = [];
-
-    if (resultA.ok && resultA.value?.content) {
-      validParts.push({
-        role: roleA.name,
-        content: resultA.value.content,
-        usage: resultA.value.usage
-      });
-    } else {
-      errors.push(`${roleA.name}: ${resultA.error || 'неизвестная ошибка'}`);
-    }
-
-    if (resultB.ok && resultB.value?.content) {
-      validParts.push({
-        role: roleB.name,
-        content: resultB.value.content,
-        usage: resultB.value.usage
-      });
-    } else {
-      errors.push(`${roleB.name}: ${resultB.error || 'неизвестная ошибка'}`);
-    }
-
-    // Логируем результаты
-    console.log(`Ансамбль: получено ${validParts.length}/2 ответов`, errors.length > 0 ? { errors } : '');
-
-    // Если ничего не получили — fallback на обычный режим
-    if (validParts.length === 0) {
-      res.write(`data: ${JSON.stringify({ 
-        type: 'status',
-        message: 'Переключаемся на базовый режим...',
-        stage: 'fallback'
-      })}\n\n`);
-
-      try {
-        const fallbackResult = await withTimeout(
-          callOpenAIOnce({
-            model: config.model,
-            temperature: 0.3,
-            max_tokens: 800,
-            timeout: config.fallbackTimeout,
-            messages: [
-              { role: 'system', content: baseSystem },
-              ...messages
-            ]
-          }),
-          config.fallbackTimeout,
-          'fallback'
-        );
-
-        if (fallbackResult.ok && fallbackResult.value?.content) {
-          return sseStreamText(res, fallbackResult.value.content);
-        } else {
-          throw new Error(fallbackResult.error || 'Fallback failed');
-        }
-      } catch (fallbackError) {
-        return sendSSEError(new Error(`Все попытки неудачны: ${fallbackError.message}`), 'total_failure');
-      }
-    }
-
-    // Агрегация результатов
-    res.write(`data: ${JSON.stringify({ 
-      type: 'status',
-      message: 'Согласовываем экспертные мнения...',
-      stage: 'aggregation',
-      experts: validParts.length
-    })}\n\n`);
-
-    const userQuestion = messages[messages.length - 1]?.content || 'Вопрос не определён';
-    
-    const aggregatorPrompt = `Ты — старший консультант-координатор.
-    
-ЗАДАЧА: Проанализировать экспертные мнения и дать единый качественный ответ.
-
-СТРУКТУРА ОТВЕТА:
-1. **Итоговый ответ** — синтез экспертных мнений, устранение противоречий
-2. **Что проверено** — ключевые аспекты (2-3 пункта)
-3. **Рекомендации** — конкретные шаги или документы
-4. При неоднозначности — **один уточняющий вопрос**
-
-ПРИНЦИПЫ:
-- Берём лучшее из каждого мнения
-- Устраняем дублирование
-- Сохраняем важные детали и ссылки
-- Структурированная подача`;
-
-    const expertOpinions = validParts.map((part, i) => 
-      `**Эксперт ${i + 1} (${part.role}):**\n${part.content}`
-    ).join('\n\n---\n\n');
-
-    try {
-      const aggregationResult = await withTimeout(
-        callOpenAIOnce({
-          model: config.model,
-          temperature: 0.2,
-          max_tokens: config.aggTokens,
-          timeout: config.timeout,
-          messages: [
-            { role: 'system', content: aggregatorPrompt },
-            { role: 'user', content: `ВОПРОС ПОЛЬЗОВАТЕЛЯ:\n${userQuestion}\n\n---\n\nЭКСПЕРТНЫЕ МНЕНИЯ:\n\n${expertOpinions}` }
-          ]
-        }),
-        config.timeout,
-        'aggregator'
-      );
-
-      if (aggregationResult.ok && aggregationResult.value?.content) {
-        // Добавляем метаинформацию в начало
-        const metadata = `*Ответ подготовлен ансамблем из ${validParts.length} экспертов*\n\n---\n\n`;
-        const finalContent = metadata + aggregationResult.value.content;
-        
-        return sseStreamText(res, finalContent);
-      } else {
-        // Если агрегация не удалась, отдаём лучший из имеющихся ответов
-        const bestAnswer = validParts.reduce((best, current) => 
-          (current.content.length > best.content.length) ? current : best
-        );
-        
-        const fallbackContent = `*Экспертное мнение: ${bestAnswer.role}*\n\n${bestAnswer.content}`;
-        return sseStreamText(res, fallbackContent);
-      }
-    } catch (aggError) {
-      // Если агрегация упала, отдаём объединённые ответы экспертов
-      const combinedContent = validParts.map((part, i) => 
-        `### ${part.role}\n\n${part.content}`
-      ).join('\n\n---\n\n');
-      
-      return sseStreamText(res, combinedContent);
-    }
-
-  } catch (error) {
-    console.error('Критическая ошибка в /api/chat_plus:', error);
-    return sendSSEError(error, 'critical_error');
-  }
-});
+// Обычный чат
 app.post('/api/chat', authRequired, express.json(), async (req, res) => {
   try {
     const { messages, attachmentId } = req.body || {};
@@ -810,57 +494,9 @@ app.post('/api/chat', authRequired, express.json(), async (req, res) => {
     }
 
     const systemPrompt = `Ты — онлайн-помощник главного бухгалтера для РФ. Отвечай кратко и по делу, по-русски.
-Если вопрос требует персональных данных — попроси обезличить и предложи инструмент /anonimize/.1. Назначение чат-бота
-Чат-бот — интеллектуальный помощник, созданный для поддержки главных бухгалтеров и сотрудников бухгалтерии. Он предоставляет консультации по вопросам налогообложения, учета и законодательства.
-Чат-бот помогает:
-Разъяснять требования законодательства;
-Подсказывать порядок заполнения отчетности;
-Выполнять расчеты (налоги, взносы, проценты);
-Отвечать на вопросы по проводкам, НДС, УСН, учету доходов и расходов.
-Он не интегрируется с бухгалтерскими программами (1С, SAP), базами данных и порталами ФНС, ПФР и др.
-2. Возможности чат-бота
-Консультации по законодательству — налоги, сборы, сроки сдачи, изменения в законах.
-Помощь с расчетами — налоги, взносы, штрафы и пени на основе введённых данных.
-Подсказки по отчетности — формы (НДС, 3-НДФЛ, отчеты в ФСС).
-Разъяснение терминов — бухгалтерские термины и учетные процедуры.
-Примеры проводок — типовые бухгалтерские проводки.
-Актуальность — обновление информации (по состоянию на 30 июля 2025 года).
-2. Формат общения:
-Пишите на русском в свободной форме. Примеры:
-«Как рассчитать НДС с аванса?»
-«Срок сдачи декларации по УСН за 2025 год?»
-«Проводки по аренде помещения».
-3. Ввод данных для расчетов:
-Указывайте точные параметры (доход, ставка налога, период).
-Пример: «Налог на прибыль при доходе 1 200 000 руб. и расходах 800 000 руб.»
-4. Рекомендации
-Формулируйте запросы чётко (указывайте тип организации, налоговый режим).
-Уточняйте актуальность, если речь о законодательстве.
-Не передавайте ИНН, паспортные данные или конфиденциальную информацию.
-5. Ограничения
-Нет интеграции с программами или порталами.
-Рекомендательный характер ответов — бот не несёт ответственности за принятые решения.
-Не решает сложные задачи — аудит и т.п.
-Язык общения — русский.
-6. Примеры сценариев
-Вопрос о сроках
-Пользователь: «Когда сдавать 6-НДФЛ в 2025 году?»
-Бот: «1 кв. — до 25.04.2025, полугодие — до 25.07.2025, 9 мес. — до 25.10.2025, за год — до 25.02.2026».
-Расчет налога
-Пользователь: «Рассчитай УСН 6% при доходе 500 000 руб.»
-Бот: «Налог = 30 000 руб. Возможно уменьшение на взносы».
-Проводки
-Пользователь: «Начисление зарплаты»
-Бот:
-Дт 20 (26, 44) Кт 70 — начислена зарплата
-Дт 70 Кт 68 — удержан НДФЛ
-Дт 20 (26, 44) Кт 69 — начислены взносы
-7. Техническая поддержка
-Если бот не понимает запрос — переформулируйте.
-При необходимости обратитесь в поддержку через сайт или email.
-8. Заключение
-Чат-бот — удобный инструмент для быстрого решения типовых задач главного бухгалтера. Он экономит время. Используй вложенный текст ниже как контекст, если он релевантен.${attachmentNote}`;
-   const body = {
+Если вопрос требует персональных данных — попроси обезличить и предложи инструмент /anonimize/.${attachmentNote}`;
+
+    const body = {
       model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
       stream: true,
       messages: [
@@ -925,137 +561,160 @@ app.post('/api/chat', authRequired, express.json(), async (req, res) => {
   }
 });
 
-/* ================== API: ОБЕЗЛИЧИВАНИЕ (ОТКРЫТО) ================== */
-app.post('/api/anon', upload.single('file'), async (req, res) => {
+// Ансамбль чат - ИСПРАВЛЕНА функция sseStreamText
+app.post('/api/chat_plus', authRequired, express.json(), async (req, res) => {
+  let headersSent = false;
+  
+  // Утилита для безопасной отправки SSE заголовков
+  const ensureSSEHeaders = () => {
+    if (!headersSent) {
+      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache, no-transform');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.flushHeaders?.();
+      headersSent = true;
+    }
+  };
+  
+  // Утилита для отправки SSE ошибки
+  const sendSSEError = (error, code = 'ensemble_error') => {
+    try {
+      ensureSSEHeaders();
+      res.write(`data: ${JSON.stringify({ 
+        type: 'error',
+        error: code, 
+        message: String(error?.message || error),
+        timestamp: new Date().toISOString()
+      })}\n\n`);
+      res.end();
+    } catch (writeError) {
+      console.error('Ошибка отправки SSE error:', writeError);
+      if (!res.headersSent) {
+        res.status(500).json({ error: code, message: String(error?.message || error) });
+      }
+    }
+  };
+
   try {
-    if (!req.file) return res.status(400).json({ error: 'Файл не получен' });
-
-    const raw = await extractTextFrom(req.file);
-    const trimmed = clampText(raw, 20000);
-    const safe = redactPII(trimmed);
-
-    const base = (req.file.originalname || 'document').replace(/\.[^.]+$/, '');
-    const fname = `${base}-anon.txt`;
-
-    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fname)}"`);
-    return res.send(safe);
-  } catch (e) {
-    return res.status(400).json({ error: String(e.message || e) });
-  }
-});
-
-/* ================== API: РЕГИСТРАЦИЯ (2 ШАГА) ================== */
-// Шаг 1 — отправка кода
-app.post('/api/register/init', express.json(), async (req, res) => {
-  try {
-    const name  = String(req.body?.name  || '').trim();
-    const phone = String(req.body?.phone || '').trim();
-    const email = String(req.body?.email || '').trim().toLowerCase();
-
-    if (!name || name.length < 3)  return res.status(400).json({ error: 'Укажите ФИО' });
-    if (!isValidPhone(phone))      return res.status(400).json({ error: 'Укажите корректный телефон' });
-    if (!isValidEmail(email))      return res.status(400).json({ error: 'Укажите корректный e-mail' });
-
-    const old = pending.get(email);
-    if (old && Date.now() - (old.lastSentAt || 0) < 60000) {
-      return res.status(429).json({ error: 'Код уже отправлен. Попробуйте через минуту.' });
+    const { messages, attachmentId } = req.body || {};
+    
+    // Валидация входных данных
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return sendSSEError(new Error('messages должен быть непустым массивом'), 'invalid_input');
     }
 
-    const code = genCode();
-    const expiresAt = Date.now() + 1000 * 60 * 10; // 10 минут
-    pending.set(email, { name, phone, code, expiresAt, lastSentAt: Date.now() });
+    // Проверяем структуру сообщений
+    for (const msg of messages) {
+      if (!msg.role || !msg.content || typeof msg.content !== 'string') {
+        return sendSSEError(new Error('Каждое сообщение должно содержать role и content'), 'invalid_message');
+      }
+    }
 
-    const subject = 'Код подтверждения — Ваш ГлавБух';
-    const text = `Здравствуйте, ${name}!\n\nВаш код подтверждения: ${code}\nСрок действия: 10 минут.\n\nЕсли вы не запрашивали код, просто игнорируйте это письмо.`;
+    // Контекст вложения
+    let attachmentNote = '';
+    if (attachmentId && attachments.has(attachmentId)) {
+      const attachment = attachments.get(attachmentId);
+      const truncatedText = attachment.text.length > 8000 
+        ? attachment.text.slice(0, 8000) + '...[обрезано]'
+        : attachment.text;
+      attachmentNote = `\n\nВложенный текст (обезличенный, до 8k):\n${truncatedText}`;
+    }
 
-    await sendEmail(email, subject, text);
+    // Конфигурация
+    const config = {
+      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+      timeout: Number(process.env.ENSEMBLE_TIMEOUT_MS || 15000),
+      aggTokens: Number(process.env.ENSEMBLE_AGG_TOKENS || 1000),
+      fallbackTimeout: Number(process.env.FALLBACK_TIMEOUT_MS || 10000)
+    };
 
-    for (const [k, v] of pending) if (Date.now() > v.expiresAt) pending.delete(k);
+    // Базовый системный промпт
+    const baseSystem = `Ты — онлайн-помощник главного бухгалтера для РФ. Отвечай кратко и по делу, по-русски.${attachmentNote}`;
 
-    return res.json({ ok: true });
-  } catch (e) {
-    return res.status(400).json({ error: String(e.message || e) });
-  }
-});
+    // Две роли
+    const roleA = {
+      name: 'Нормативно-правовой',
+      system: `${baseSystem}\n\nРОЛЬ: Нормативно-правовой консультант\nФОКУС: Точность, ссылки на НК РФ/ПБУ/ФЗ, формулы расчётов.`,
+      temperature: 0.2
+    };
 
-// Шаг 2 — проверка кода и выдача токена
-app.post('/api/register/verify', express.json(), (req, res) => {
-  try {
-    const email = String(req.body?.email || '').trim().toLowerCase();
-    const code  = String(req.body?.code  || '').trim();
+    const roleB = {
+      name: 'Практико-прикладной',
+      system: `${baseSystem}\n\nРОЛЬ: Практический консультант\nФОКУС: Реальные кейсы, ошибки, рекомендации по процедурам.`,
+      temperature: 0.4
+    };
 
-    if (!isValidEmail(email))        return res.status(400).json({ error: 'E-mail некорректен' });
-    if (!/^\d{6}$/.test(code))       return res.status(400).json({ error: 'Код должен быть 6 цифр' });
+    // Отправляем начальный статус
+    ensureSSEHeaders();
+    res.write(`data: ${JSON.stringify({ 
+      type: 'status',
+      message: 'Запускаем ансамбль экспертов...',
+      stage: 'init'
+    })}\n\n`);
 
-    const rec = pending.get(email);
-    if (!rec)                        return res.status(400).json({ error: 'Код не найден. Запросите новый.' });
-    if (Date.now() > rec.expiresAt) { pending.delete(email); return res.status(400).json({ error: 'Срок кода истёк. Запросите новый.' }); }
-    if (rec.code !== code)           return res.status(400).json({ error: 'Неверный код' });
+    // Готовим запросы
+    const createRequest = (role) => callOpenAIOnce({
+      model: config.model,
+      temperature: role.temperature,
+      max_tokens: 700,
+      timeout: config.timeout,
+      messages: [
+        { role: 'system', content: role.system },
+        ...messages
+      ]
+    });
 
-    const ttlMs = 1000 * 60 * 60 * 24; // 1 день
-    const expiresAt = Date.now() + ttlMs;
-    const token = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+    const requestA = createRequest(roleA);
+    const requestB = createRequest(roleB);
 
-    accounts.set(email, { expiresAt, token, name: rec.name, phone: rec.phone });
-    tokens.set(token,   { email, expiresAt });
-    pending.delete(email);
+    // Выполняем параллельно
+    const [resultA, resultB] = await Promise.all([
+      withTimeout(requestA, config.timeout, 'A'),
+      withTimeout(requestB, config.timeout, 'B')
+    ]);
 
-    return res.json({ ok: true, email, token, expiresAt });
-  } catch (e) {
-    return res.status(400).json({ error: String(e.message || e) });
-  }
-});
+    // Собираем результаты
+    const validParts = [];
+    const errors = [];
 
-/* ================== СЛУЖЕБНОЕ И СТАТИКА ================== */
-app.get('/health', (req, res) => {
-  res.json({ ok: true, time: new Date().toISOString() });
-});
+    if (resultA.ok && resultA.value?.content) {
+      validParts.push({
+        role: roleA.name,
+        content: resultA.value.content,
+        usage: resultA.value.usage
+      });
+    } else {
+      errors.push(`${roleA.name}: ${resultA.error || 'неизвестная ошибка'}`);
+    }
 
-app.use(express.static(path.join(__dirname, 'public')));
+    if (resultB.ok && resultB.value?.content) {
+      validParts.push({
+        role: roleB.name,
+        content: resultB.value.content,
+        usage: resultB.value.usage
+      });
+    } else {
+      errors.push(`${roleB.name}: ${resultB.error || 'неизвестная ошибка'}`);
+    }
 
-app.get('/widget', (req, res) => {
-  // Проверяем токен в cookie (HttpOnly тут не обязателен, мы ставим обычную cookie)
-  const token = getCookie(req, 'gb_token');
-  const info = token ? tokens.get(token) : null;
-  const valid = info && Date.now() < info.expiresAt;
+    console.log(`Ансамбль: получено ${validParts.length}/2 ответов`, errors.length > 0 ? { errors } : '');
 
-  if (!valid) {
-    // Нет доступа — показываем простую заглушку
-    return res.send(`
-      <!doctype html>
-      <meta charset="utf-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1">
-      <title>Доступ к чату</title>
-      <style>
-        body{margin:0;background:#f7f8fb;font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Arial;color:#111827}
-        .wrap{max-width:640px;margin:0 auto;padding:24px}
-        .card{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:16px}
-        a.button{display:inline-block;padding:10px 16px;border-radius:10px;background:#10B981;color:#fff;text-decoration:none;font-weight:700}
-        .muted{font-size:13px;color:#6B7280}
-      </style>
-      <div class="wrap">
-        <div class="card">
-          <h1 style="margin:0 0 6px;color:#1E3A8A;font-size:20px">Доступ только для зарегистрированных</h1>
-          <p class="muted">Чтобы открыть чат онлайн-помощника, пройдите регистрацию и подтвердите e-mail. Это займёт минуту.</p>
-          <p><a class="button" href="/register">Зарегистрироваться</a></p>
-        </div>
-      </div>
-    `);
-  }
+    // Fallback если ничего не получили
+    if (validParts.length === 0) {
+      res.write(`data: ${JSON.stringify({ 
+        type: 'status',
+        message: 'Переключаемся на базовый режим...',
+        stage: 'fallback'
+      })}\n\n`);
 
-  // Доступ есть — отдаём виджет
-  res.sendFile(path.join(__dirname, 'public', 'widget.html'));
-});
-app.get('/anon', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'anon.html'));
-});
-app.get('/register', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'register.html'));
-});
-
-/* ================== ЗАПУСК ================== */
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log('Server running on', PORT);
-});
+      try {
+        const fallbackResult = await withTimeout(
+          callOpenAIOnce({
+            model: config.model,
+            temperature: 0.3,
+            max_tokens: 800,
+            timeout: config.fallbackTimeout,
+            messages: [
+              { role:
