@@ -24,6 +24,338 @@ const upload = multer({
 });
 
 /* ================== УТИЛИТЫ ================== */
+// ========= Ансамбль: утилиты =========
+
+// Конфигурация по умолчанию
+const DEFAULT_CONFIG = {
+  TIMEOUT_MS: 30000,
+  MAX_TOKENS: 700,
+  TEMPERATURE: 0.3,
+  CHUNK_SIZE: 900,
+  RETRY_ATTEMPTS: 3,
+  RETRY_DELAY_MS: 1000
+};
+
+// Улучшенная обёртка таймаута с детальной информацией
+function withTimeout(promise, ms = DEFAULT_CONFIG.TIMEOUT_MS, tag = 'task') {
+  if (typeof ms !== 'number' || ms <= 0) {
+    throw new Error('Timeout должен быть положительным числом');
+  }
+  
+  return new Promise((resolve) => {
+    const startTime = Date.now();
+    const timer = setTimeout(() => {
+      const elapsed = Date.now() - startTime;
+      resolve({ 
+        ok: false, 
+        tag, 
+        error: 'timeout',
+        details: {
+          timeoutMs: ms,
+          elapsedMs: elapsed
+        }
+      });
+    }, ms);
+    
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        const elapsed = Date.now() - startTime;
+        resolve({ 
+          ok: true, 
+          tag, 
+          value,
+          details: {
+            elapsedMs: elapsed
+          }
+        });
+      },
+      (error) => {
+        clearTimeout(timer);
+        const elapsed = Date.now() - startTime;
+        resolve({ 
+          ok: false, 
+          tag, 
+          error: String(error?.message || error || 'Unknown error'),
+          details: {
+            elapsedMs: elapsed,
+            originalError: error
+          }
+        });
+      }
+    );
+  });
+}
+
+// Функция повтора с экспоненциальной задержкой
+async function withRetry(fn, attempts = DEFAULT_CONFIG.RETRY_ATTEMPTS, baseDelayMs = DEFAULT_CONFIG.RETRY_DELAY_MS) {
+  let lastError;
+  
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      
+      if (attempt === attempts) {
+        throw error;
+      }
+      
+      // Экспоненциальная задержка с jitter
+      const delay = baseDelayMs * Math.pow(2, attempt - 1) + Math.random() * 1000;
+      await new Promise(resolve => setTimeout(resolve, delay));
+      
+      console.warn(`Попытка ${attempt}/${attempts} неудачна, повтор через ${Math.round(delay)}мс:`, error.message);
+    }
+  }
+  
+  throw lastError;
+}
+
+// Валидация параметров OpenAI
+function validateOpenAIParams({ model, messages, temperature, max_tokens }) {
+  if (!model || typeof model !== 'string') {
+    throw new Error('Параметр model обязателен и должен быть строкой');
+  }
+  
+  if (!Array.isArray(messages) || messages.length === 0) {
+    throw new Error('Параметр messages должен быть непустым массивом');
+  }
+  
+  for (const msg of messages) {
+    if (!msg.role || !msg.content) {
+      throw new Error('Каждое сообщение должно содержать role и content');
+    }
+  }
+  
+  if (temperature !== undefined && (typeof temperature !== 'number' || temperature < 0 || temperature > 2)) {
+    throw new Error('Temperature должен быть числом от 0 до 2');
+  }
+  
+  if (max_tokens !== undefined && (typeof max_tokens !== 'number' || max_tokens <= 0)) {
+    throw new Error('max_tokens должен быть положительным числом');
+  }
+}
+
+// Улучшенный вызов OpenAI с retry и валидацией
+async function callOpenAIOnce({ 
+  model, 
+  messages, 
+  temperature = DEFAULT_CONFIG.TEMPERATURE, 
+  max_tokens = DEFAULT_CONFIG.MAX_TOKENS,
+  timeout = DEFAULT_CONFIG.TIMEOUT_MS
+}) {
+  // Проверяем API ключ
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    throw new Error('OPENAI_API_KEY не установлен в переменных окружения');
+  }
+  
+  // Валидация параметров
+  validateOpenAIParams({ model, messages, temperature, max_tokens });
+  
+  // Функция для одного запроса
+  const makeRequest = async () => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    
+    try {
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          'User-Agent': 'OpenAI-Node-Client'
+        },
+        body: JSON.stringify({ 
+          model, 
+          messages, 
+          temperature, 
+          max_tokens, 
+          stream: false 
+        }),
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        let errorDetails = `HTTP ${response.status}`;
+        try {
+          const errorData = await response.json();
+          errorDetails = errorData.error?.message || JSON.stringify(errorData);
+        } catch {
+          try {
+            errorDetails = await response.text();
+          } catch {}
+        }
+        
+        // Специальная обработка разных типов ошибок OpenAI
+        if (response.status === 401) {
+          throw new Error('Неверный API ключ OpenAI');
+        } else if (response.status === 429) {
+          throw new Error('Превышен лимит запросов OpenAI');
+        } else if (response.status === 500) {
+          throw new Error('Внутренняя ошибка OpenAI');
+        }
+        
+        throw new Error(`OpenAI API Error: ${errorDetails}`);
+      }
+      
+      const data = await response.json();
+      
+      // Проверяем структуру ответа
+      if (!data.choices || !Array.isArray(data.choices) || data.choices.length === 0) {
+        throw new Error('Некорректный ответ от OpenAI: отсутствуют choices');
+      }
+      
+      const content = data.choices[0]?.message?.content;
+      if (typeof content !== 'string') {
+        throw new Error('Некорректный ответ от OpenAI: отсутствует content');
+      }
+      
+      return {
+        content: content.trim(),
+        usage: data.usage,
+        model: data.model,
+        finishReason: data.choices[0]?.finish_reason
+      };
+      
+    } catch (error) {
+      clearTimeout(timeoutId);
+      
+      if (error.name === 'AbortError') {
+        throw new Error(`Таймаут запроса к OpenAI (${timeout}мс)`);
+      }
+      
+      throw error;
+    }
+  };
+  
+  // Выполняем с retry
+  return await withRetry(makeRequest);
+}
+
+// Улучшенная функция стриминга SSE
+function sseStreamText(res, text, chunkSize = DEFAULT_CONFIG.CHUNK_SIZE) {
+  if (!res || typeof res.write !== 'function') {
+    throw new Error('Некорректный объект response');
+  }
+  
+  if (typeof text !== 'string') {
+    throw new Error('Текст должен быть строкой');
+  }
+  
+  if (typeof chunkSize !== 'number' || chunkSize <= 0) {
+    chunkSize = DEFAULT_CONFIG.CHUNK_SIZE;
+  }
+  
+  try {
+    // Устанавливаем заголовки SSE, если еще не установлены
+    if (!res.headersSent) {
+      res.writeHead(200, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Cache-Control'
+      });
+    }
+    
+    let totalSent = 0;
+    const totalLength = text.length;
+    
+    // Отправляем метаинформацию
+    res.write(`data: ${JSON.stringify({ 
+      type: 'start',
+      totalLength,
+      chunkSize 
+    })}\n\n`);
+    
+    // Отправляем текст порциями
+    for (let i = 0; i < text.length; i += chunkSize) {
+      const chunk = text.slice(i, i + chunkSize);
+      totalSent += chunk.length;
+      
+      const progress = Math.round((totalSent / totalLength) * 100);
+      
+      res.write(`data: ${JSON.stringify({ 
+        type: 'chunk',
+        delta: chunk,
+        progress,
+        chunkIndex: Math.floor(i / chunkSize),
+        totalSent
+      })}\n\n`);
+      
+      // Небольшая задержка для имитации потока
+      if (i + chunkSize < text.length) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+    }
+    
+    // Финальное сообщение
+    res.write(`data: ${JSON.stringify({ 
+      type: 'end',
+      totalSent,
+      completed: true
+    })}\n\n`);
+    
+    res.end();
+    
+  } catch (error) {
+    // Отправляем ошибку через SSE
+    try {
+      res.write(`data: ${JSON.stringify({ 
+        type: 'error',
+        error: error.message 
+      })}\n\n`);
+      res.end();
+    } catch {
+      // Если не можем отправить ошибку через SSE, логируем
+      console.error('Ошибка при SSE стриминге:', error);
+    }
+  }
+}
+
+// Утилита для безопасного JSON.stringify
+function safeStringify(obj, maxLength = 1000) {
+  try {
+    const str = JSON.stringify(obj, null, 2);
+    return str.length > maxLength ? str.slice(0, maxLength) + '...[truncated]' : str;
+  } catch (error) {
+    return `[Ошибка сериализации: ${error.message}]`;
+  }
+}
+
+// Логгер с уровнями
+const logger = {
+  info: (message, ...args) => {
+    console.log(`[INFO] ${new Date().toISOString()} - ${message}`, ...args);
+  },
+  warn: (message, ...args) => {
+    console.warn(`[WARN] ${new Date().toISOString()} - ${message}`, ...args);
+  },
+  error: (message, error, ...args) => {
+    console.error(`[ERROR] ${new Date().toISOString()} - ${message}`, error, ...args);
+  },
+  debug: (message, data) => {
+    if (process.env.NODE_ENV === 'development') {
+      console.debug(`[DEBUG] ${new Date().toISOString()} - ${message}`, safeStringify(data));
+    }
+  }
+};
+
+// Экспорт всех функций
+module.exports = {
+  withTimeout,
+  withRetry,
+  callOpenAIOnce,
+  sseStreamText,
+  validateOpenAIParams,
+  safeStringify,
+  logger,
+  DEFAULT_CONFIG
+};
 function clampText(s, max = 8000) {
   if (!s) return '';
   s = s.replace(/\r/g, '');
@@ -153,6 +485,314 @@ app.post('/api/upload', authRequired, upload.single('file'), async (req, res) =>
 });
 
 /* ================== API: ЧАТ ================== */
+// ========= Ансамбль: две версии + агрегатор =========
+app.post('/api/chat_plus', authRequired, express.json(), async (req, res) => {
+  let headersSent = false;
+  
+  // Утилита для безопасной отправки SSE заголовков
+  const ensureSSEHeaders = () => {
+    if (!headersSent) {
+      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache, no-transform');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.flushHeaders?.();
+      headersSent = true;
+    }
+  };
+  
+  // Утилита для отправки SSE ошибки
+  const sendSSEError = (error, code = 'ensemble_error') => {
+    try {
+      ensureSSEHeaders();
+      res.write(`data: ${JSON.stringify({ 
+        type: 'error',
+        error: code, 
+        message: String(error?.message || error),
+        timestamp: new Date().toISOString()
+      })}\n\n`);
+      res.end();
+    } catch (writeError) {
+      console.error('Ошибка отправки SSE error:', writeError);
+      if (!res.headersSent) {
+        res.status(500).json({ error: code, message: String(error?.message || error) });
+      }
+    }
+  };
+
+  try {
+    const { messages, attachmentId } = req.body || {};
+    
+    // Валидация входных данных
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return sendSSEError(new Error('messages должен быть непустым массивом'), 'invalid_input');
+    }
+
+    // Проверяем структуру сообщений
+    for (const msg of messages) {
+      if (!msg.role || !msg.content || typeof msg.content !== 'string') {
+        return sendSSEError(new Error('Каждое сообщение должно содержать role и content'), 'invalid_message');
+      }
+    }
+
+    // Контекст вложения (как в обычном /api/chat)
+    let attachmentNote = '';
+    if (attachmentId && attachments.has(attachmentId)) {
+      const attachment = attachments.get(attachmentId);
+      const truncatedText = attachment.text.length > 8000 
+        ? attachment.text.slice(0, 8000) + '...[обрезано]'
+        : attachment.text;
+      attachmentNote = `\n\nВложенный текст (обезличенный, до 8k):\n${truncatedText}`;
+    }
+
+    // Конфигурация из переменных окружения
+    const config = {
+      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+      timeout: Number(process.env.ENSEMBLE_TIMEOUT_MS || 15000), // увеличил до 15с
+      aggTokens: Number(process.env.ENSEMBLE_AGG_TOKENS || 1000),
+      fallbackTimeout: Number(process.env.FALLBACK_TIMEOUT_MS || 10000)
+    };
+
+    // Базовый системный промпт
+    const baseSystem = `Ты — онлайн-помощник главного бухгалтера для РФ. Отвечай кратко и по делу, по-русски.
+Если вопрос требует персональных данных — попроси обезличить и предложи инструмент /anonimize/.1. Назначение чат-бота
+Чат-бот — интеллектуальный помощник, созданный для поддержки главных бухгалтеров и сотрудников бухгалтерии. Он предоставляет консультации по вопросам налогообложения, учета и законодательства.
+Чат-бот помогает:
+Разъяснять требования законодательства;
+Подсказывать порядок заполнения отчетности;
+Выполнять расчеты (налоги, взносы, проценты);
+Отвечать на вопросы по проводкам, НДС, УСН, учету доходов и расходов.
+Он не интегрируется с бухгалтерскими программами (1С, SAP), базами данных и порталами ФНС, ПФР и др.
+2. Возможности чат-бота
+Консультации по законодательству — налоги, сборы, сроки сдачи, изменения в законах.
+Помощь с расчетами — налоги, взносы, штрафы и пени на основе введённых данных.
+Подсказки по отчетности — формы (НДС, 3-НДФЛ, отчеты в ФСС).
+Разъяснение терминов — бухгалтерские термины и учетные процедуры.
+Примеры проводок — типовые бухгалтерские проводки.
+Актуальность — обновление информации (по состоянию на 30 июля 2025 года).
+2. Формат общения:
+Пишите на русском в свободной форме. Примеры:
+«Как рассчитать НДС с аванса?»
+«Срок сдачи декларации по УСН за 2025 год?»
+«Проводки по аренде помещения».
+3. Ввод данных для расчетов:
+Указывайте точные параметры (доход, ставка налога, период).
+Пример: «Налог на прибыль при доходе 1 200 000 руб. и расходах 800 000 руб.»
+4. Рекомендации
+Формулируйте запросы чётко (указывайте тип организации, налоговый режим).
+Уточняйте актуальность, если речь о законодательстве.
+Не передавайте ИНН, паспортные данные или конфиденциальную информацию.
+5. Ограничения
+Нет интеграции с программами или порталами.
+Рекомендательный характер ответов — бот не несёт ответственности за принятые решения.
+Не решает сложные задачи — аудит и т.п.
+Язык общения — русский.
+6. Примеры сценариев
+Вопрос о сроках
+Пользователь: «Когда сдавать 6-НДФЛ в 2025 году?»
+Бот: «1 кв. — до 25.04.2025, полугодие — до 25.07.2025, 9 мес. — до 25.10.2025, за год — до 25.02.2026».
+Расчет налога
+Пользователь: «Рассчитай УСН 6% при доходе 500 000 руб.»
+Бот: «Налог = 30 000 руб. Возможно уменьшение на взносы».
+Проводки
+Пользователь: «Начисление зарплаты»
+Бот:
+Дт 20 (26, 44) Кт 70 — начислена зарплата
+Дт 70 Кт 68 — удержан НДФЛ
+Дт 20 (26, 44) Кт 69 — начислены взносы
+7. Техническая поддержка
+Если бот не понимает запрос — переформулируйте.
+При необходимости обратитесь в поддержку через сайт или email.
+8. Заключение
+Чат-бот — удобный инструмент для быстрого решения типовых задач главного бухгалтера. Он экономит время. Используй вложенный текст ниже как контекст, если он релевантен.${attachmentNote}`;
+
+    // Две специализированные роли для ансамбля
+    const roleA = {
+      name: 'Нормативно-правовой',
+      system: `${baseSystem}
+
+РОЛЬ: Нормативно-правовой консультант
+ФОКУС: Точность формулировок, ссылки на НК РФ/ПБУ/ФЗ/письма ФНС (где уместно), корректность терминологии, формулы расчётов.
+СТИЛЬ: Структурированный, с опорой на нормативную базу.`,
+      temperature: 0.2
+    };
+
+    const roleB = {
+      name: 'Практико-прикладной',
+      system: `${baseSystem}
+
+РОЛЬ: Практический консультант
+ФОКУС: Реальные кейсы, типичные ошибки, "подводные камни", рекомендации по документообороту, учётная политика, процедуры.
+СТИЛЬ: Практический, с примерами и чек-листами.`,
+      temperature: 0.4
+    };
+
+    // Отправляем начальный статус
+    ensureSSEHeaders();
+    res.write(`data: ${JSON.stringify({ 
+      type: 'status',
+      message: 'Запускаем ансамбль экспертов...',
+      stage: 'init'
+    })}\n\n`);
+
+    // Готовим два параллельных запроса
+    const createRequest = (role) => callOpenAIOnce({
+      model: config.model,
+      temperature: role.temperature,
+      max_tokens: 700,
+      timeout: config.timeout,
+      messages: [
+        { role: 'system', content: role.system },
+        ...messages
+      ]
+    });
+
+    const requestA = createRequest(roleA);
+    const requestB = createRequest(roleB);
+
+    // Выполняем запросы параллельно с таймаутом
+    const [resultA, resultB] = await Promise.all([
+      withTimeout(requestA, config.timeout, 'A'),
+      withTimeout(requestB, config.timeout, 'B')
+    ]);
+
+    // Собираем успешные ответы
+    const validParts = [];
+    const errors = [];
+
+    if (resultA.ok && resultA.value?.content) {
+      validParts.push({
+        role: roleA.name,
+        content: resultA.value.content,
+        usage: resultA.value.usage
+      });
+    } else {
+      errors.push(`${roleA.name}: ${resultA.error || 'неизвестная ошибка'}`);
+    }
+
+    if (resultB.ok && resultB.value?.content) {
+      validParts.push({
+        role: roleB.name,
+        content: resultB.value.content,
+        usage: resultB.value.usage
+      });
+    } else {
+      errors.push(`${roleB.name}: ${resultB.error || 'неизвестная ошибка'}`);
+    }
+
+    // Логируем результаты
+    console.log(`Ансамбль: получено ${validParts.length}/2 ответов`, errors.length > 0 ? { errors } : '');
+
+    // Если ничего не получили — fallback на обычный режим
+    if (validParts.length === 0) {
+      res.write(`data: ${JSON.stringify({ 
+        type: 'status',
+        message: 'Переключаемся на базовый режим...',
+        stage: 'fallback'
+      })}\n\n`);
+
+      try {
+        const fallbackResult = await withTimeout(
+          callOpenAIOnce({
+            model: config.model,
+            temperature: 0.3,
+            max_tokens: 800,
+            timeout: config.fallbackTimeout,
+            messages: [
+              { role: 'system', content: baseSystem },
+              ...messages
+            ]
+          }),
+          config.fallbackTimeout,
+          'fallback'
+        );
+
+        if (fallbackResult.ok && fallbackResult.value?.content) {
+          return sseStreamText(res, fallbackResult.value.content);
+        } else {
+          throw new Error(fallbackResult.error || 'Fallback failed');
+        }
+      } catch (fallbackError) {
+        return sendSSEError(new Error(`Все попытки неудачны: ${fallbackError.message}`), 'total_failure');
+      }
+    }
+
+    // Агрегация результатов
+    res.write(`data: ${JSON.stringify({ 
+      type: 'status',
+      message: 'Согласовываем экспертные мнения...',
+      stage: 'aggregation',
+      experts: validParts.length
+    })}\n\n`);
+
+    const userQuestion = messages[messages.length - 1]?.content || 'Вопрос не определён';
+    
+    const aggregatorPrompt = `Ты — старший консультант-координатор.
+    
+ЗАДАЧА: Проанализировать экспертные мнения и дать единый качественный ответ.
+
+СТРУКТУРА ОТВЕТА:
+1. **Итоговый ответ** — синтез экспертных мнений, устранение противоречий
+2. **Что проверено** — ключевые аспекты (2-3 пункта)
+3. **Рекомендации** — конкретные шаги или документы
+4. При неоднозначности — **один уточняющий вопрос**
+
+ПРИНЦИПЫ:
+- Берём лучшее из каждого мнения
+- Устраняем дублирование
+- Сохраняем важные детали и ссылки
+- Структурированная подача`;
+
+    const expertOpinions = validParts.map((part, i) => 
+      `**Эксперт ${i + 1} (${part.role}):**\n${part.content}`
+    ).join('\n\n---\n\n');
+
+    try {
+      const aggregationResult = await withTimeout(
+        callOpenAIOnce({
+          model: config.model,
+          temperature: 0.2,
+          max_tokens: config.aggTokens,
+          timeout: config.timeout,
+          messages: [
+            { role: 'system', content: aggregatorPrompt },
+            { role: 'user', content: `ВОПРОС ПОЛЬЗОВАТЕЛЯ:\n${userQuestion}\n\n---\n\nЭКСПЕРТНЫЕ МНЕНИЯ:\n\n${expertOpinions}` }
+          ]
+        }),
+        config.timeout,
+        'aggregator'
+      );
+
+      if (aggregationResult.ok && aggregationResult.value?.content) {
+        // Добавляем метаинформацию в начало
+        const metadata = `*Ответ подготовлен ансамблем из ${validParts.length} экспертов*\n\n---\n\n`;
+        const finalContent = metadata + aggregationResult.value.content;
+        
+        return sseStreamText(res, finalContent);
+      } else {
+        // Если агрегация не удалась, отдаём лучший из имеющихся ответов
+        const bestAnswer = validParts.reduce((best, current) => 
+          (current.content.length > best.content.length) ? current : best
+        );
+        
+        const fallbackContent = `*Экспертное мнение: ${bestAnswer.role}*\n\n${bestAnswer.content}`;
+        return sseStreamText(res, fallbackContent);
+      }
+    } catch (aggError) {
+      // Если агрегация упала, отдаём объединённые ответы экспертов
+      const combinedContent = validParts.map((part, i) => 
+        `### ${part.role}\n\n${part.content}`
+      ).join('\n\n---\n\n');
+      
+      return sseStreamText(res, combinedContent);
+    }
+
+  } catch (error) {
+    console.error('Критическая ошибка в /api/chat_plus:', error);
+    return sendSSEError(error, 'critical_error');
+  }
+});
 app.post('/api/chat', authRequired, express.json(), async (req, res) => {
   try {
     const { messages, attachmentId } = req.body || {};
@@ -215,9 +855,7 @@ app.post('/api/chat', authRequired, express.json(), async (req, res) => {
 7. Техническая поддержка
 Если бот не понимает запрос — переформулируйте.
 При необходимости обратитесь в поддержку через сайт или email.
-8. Обновления
-Информация актуальна на 30 июля 2025 года. Уточняйте при необходимости.
-9. Заключение
+8. Заключение
 Чат-бот — удобный инструмент для быстрого решения типовых задач главного бухгалтера. Он экономит время. Используй вложенный текст ниже как контекст, если он релевантен.${attachmentNote}`;
    const body = {
       model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
