@@ -104,7 +104,7 @@ const resp = await fetch('/api/upload', {
 
       const a = add('assistant', '…');
 const token = localStorage.getItem('gb_token') || '';
-const resp = await fetch('/api/chat', {
+const resp = await fetch('/api/chat_plus', { ... })
   method: 'POST',
   headers: { 
     'Content-Type': 'application/json',
