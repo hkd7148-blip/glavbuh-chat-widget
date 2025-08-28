@@ -289,7 +289,10 @@ function sseStreamText(res, text, chunkSize = DEFAULT_CONFIG.CHUNK_SIZE) {
       
       // Небольшая задержка для имитации потока
       if (i + chunkSize < text.length) {
-        await new Promise(resolve => setTimeout(resolve, 10));
+        async function sseStreamText(res, text) { // ✅ добавить async
+  // ... код ...
+  await new Promise(resolve => setTimeout(resolve, 10));
+}
       }
     }
     
