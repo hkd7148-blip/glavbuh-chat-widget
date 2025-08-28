@@ -514,24 +514,266 @@ app.post('/api/chat', authRequired, express.json(), async (req, res) => {
   }
 });
 
-// Ансамбль чат (упрощенная версия)
+// Полный ансамбль чат - заменить упрощенную версию /api/chat_plus
 app.post('/api/chat_plus', authRequired, express.json(), async (req, res) => {
+  let headersSent = false;
+  
+  // Утилита для безопасной отправки SSE заголовков
+  const ensureSSEHeaders = () => {
+    if (!headersSent) {
+      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache, no-transform');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.flushHeaders?.();
+      headersSent = true;
+    }
+  };
+  
+  // Утилита для отправки SSE ошибки
+  const sendSSEError = (error, code = 'ensemble_error') => {
+    try {
+      ensureSSEHeaders();
+      res.write(`data: ${JSON.stringify({ 
+        type: 'error',
+        error: code, 
+        message: String(error?.message || error),
+        timestamp: new Date().toISOString()
+      })}\n\n`);
+      res.end();
+    } catch (writeError) {
+      console.error('Ошибка отправки SSE error:', writeError);
+      if (!res.headersSent) {
+        res.status(500).json({ error: code, message: String(error?.message || error) });
+      }
+    }
+  };
+
   try {
     const { messages, attachmentId } = req.body || {};
-    if (!Array.isArray(messages)) {
-      return res.status(400).json({ error: 'messages must be an array' });
+    
+    // Валидация входных данных
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return sendSSEError(new Error('messages должен быть непустым массивом'), 'invalid_input');
     }
 
+    // Проверяем структуру сообщений
+    for (const msg of messages) {
+      if (!msg.role || !msg.content || typeof msg.content !== 'string') {
+        return sendSSEError(new Error('Каждое сообщение должно содержать role и content'), 'invalid_message');
+      }
+    }
+
+    // Контекст вложения
     let attachmentNote = '';
     if (attachmentId && attachments.has(attachmentId)) {
-      const a = attachments.get(attachmentId);
-      attachmentNote = `\n\nВложенный текст (обезличенный, до 8k):\n${a.text}`;
+      const attachment = attachments.get(attachmentId);
+      const truncatedText = attachment.text.length > 8000 
+        ? attachment.text.slice(0, 8000) + '...[обрезано]'
+        : attachment.text;
+      attachmentNote = `\n\nВложенный текст (обезличенный, до 8k):\n${truncatedText}`;
     }
 
-    const baseSystem = `Ты — онлайн-помощник главного бухгалтера для РФ. Отвечай кратко и по делу, по-русски.${attachmentNote}`;
+    // Конфигурация из переменных окружения
+    const config = {
+      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+      timeout: Number(process.env.ENSEMBLE_TIMEOUT_MS || 15000),
+      aggTokens: Number(process.env.ENSEMBLE_AGG_TOKENS || 1000),
+      fallbackTimeout: Number(process.env.FALLBACK_TIMEOUT_MS || 10000)
+    };
 
-    const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    // Базовый системный промпт
+    const baseSystem = `Ты — профессиональный онлайн-помощник главного бухгалтера для РФ.
+Отвечай по-русски, структурированно и по делу. Если что-то неоднозначно — укажи варианты и возможные риски.
+При необходимости используй вложенный текст как контекст.${attachmentNote}`;
+
+    // Две специализированные роли для ансамбля
+    const roleA = {
+      name: 'Нормативно-правовой',
+      system: `${baseSystem}
+
+РОЛЬ: Нормативно-правовой консультант
+ФОКУС: Точность формулировок, ссылки на НК РФ/ПБУ/ФЗ/письма ФНС (где уместно), корректность терминологии, формулы расчётов.
+СТИЛЬ: Структурированный, с опорой на нормативную базу.`,
+      temperature: 0.2
+    };
+
+    const roleB = {
+      name: 'Практико-прикладной',
+      system: `${baseSystem}
+
+РОЛЬ: Практический консультант
+ФОКУС: Реальные кейсы, типичные ошибки, "подводные камни", рекомендации по документообороту, учётная политика, процедуры.
+СТИЛЬ: Практический, с примерами и чек-листами.`,
+      temperature: 0.4
+    };
+
+    // Отправляем начальный статус
+    ensureSSEHeaders();
+    res.write(`data: ${JSON.stringify({ 
+      type: 'status',
+      message: 'Запускаем ансамбль экспертов...',
+      stage: 'init'
+    })}\n\n`);
+
+    // Готовим два параллельных запроса
+    const createRequest = (role) => callOpenAIOnce({
+      model: config.model,
+      temperature: role.temperature,
+      max_tokens: 700,
+      timeout: config.timeout,
+      messages: [
+        { role: 'system', content: role.system },
+        ...messages
+      ]
+    });
+
+    const requestA = createRequest(roleA);
+    const requestB = createRequest(roleB);
+
+    // Выполняем запросы параллельно с таймаутом
+    const [resultA, resultB] = await Promise.all([
+      withTimeout(requestA, config.timeout, 'A'),
+      withTimeout(requestB, config.timeout, 'B')
+    ]);
+
+    // Собираем успешные ответы
+    const validParts = [];
+    const errors = [];
+
+    if (resultA.ok && resultA.value?.content) {
+      validParts.push({
+        role: roleA.name,
+        content: resultA.value.content,
+        usage: resultA.value.usage
+      });
+    } else {
+      errors.push(`${roleA.name}: ${resultA.error || 'неизвестная ошибка'}`);
+    }
+
+    if (resultB.ok && resultB.value?.content) {
+      validParts.push({
+        role: roleB.name,
+        content: resultB.value.content,
+        usage: resultB.value.usage
+      });
+    } else {
+      errors.push(`${roleB.name}: ${resultB.error || 'неизвестная ошибка'}`);
+    }
+
+    // Логируем результаты
+    console.log(`Ансамбль: получено ${validParts.length}/2 ответов`, errors.length > 0 ? { errors } : '');
+
+    // Если ничего не получили — fallback на обычный режим
+    if (validParts.length === 0) {
+      res.write(`data: ${JSON.stringify({ 
+        type: 'status',
+        message: 'Переключаемся на базовый режим...',
+        stage: 'fallback'
+      })}\n\n`);
+
+      try {
+        const fallbackResult = await withTimeout(
+          callOpenAIOnce({
+            model: config.model,
+            temperature: 0.3,
+            max_tokens: 800,
+            timeout: config.fallbackTimeout,
+            messages: [
+              { role: 'system', content: baseSystem },
+              ...messages
+            ]
+          }),
+          config.fallbackTimeout,
+          'fallback'
+        );
+
+        if (fallbackResult.ok && fallbackResult.value?.content) {
+          return sseStreamText(res, fallbackResult.value.content);
+        } else {
+          throw new Error(fallbackResult.error || 'Fallback failed');
+        }
+      } catch (fallbackError) {
+        return sendSSEError(new Error(`Все попытки неудачны: ${fallbackError.message}`), 'total_failure');
+      }
+    }
+
+    // Агрегация результатов
+    res.write(`data: ${JSON.stringify({ 
+      type: 'status',
+      message: 'Согласовываем экспертные мнения...',
+      stage: 'aggregation',
+      experts: validParts.length
+    })}\n\n`);
+
+    const userQuestion = messages[messages.length - 1]?.content || 'Вопрос не определён';
     
+    const aggregatorPrompt = `Ты — старший консультант-координатор.
+    
+ЗАДАЧА: Проанализировать экспертные мнения и дать единый качественный ответ.
+
+СТРУКТУРА ОТВЕТА:
+1. **Итоговый ответ** — синтез экспертных мнений, устранение противоречий
+2. **Что проверено** — ключевые аспекты (2-3 пункта)
+3. **Рекомендации** — конкретные шаги или документы
+4. При неоднозначности — **один уточняющий вопрос**
+
+ПРИНЦИПЫ:
+- Берём лучшее из каждого мнения
+- Устраняем дублирование
+- Сохраняем важные детали и ссылки
+- Структурированная подача`;
+
+    const expertOpinions = validParts.map((part, i) => 
+      `**Эксперт ${i + 1} (${part.role}):**\n${part.content}`
+    ).join('\n\n---\n\n');
+
+    try {
+      const aggregationResult = await withTimeout(
+        callOpenAIOnce({
+          model: config.model,
+          temperature: 0.2,
+          max_tokens: config.aggTokens,
+          timeout: config.timeout,
+          messages: [
+            { role: 'system', content: aggregatorPrompt },
+            { role: 'user', content: `ВОПРОС ПОЛЬЗОВАТЕЛЯ:\n${userQuestion}\n\n---\n\nЭКСПЕРТНЫЕ МНЕНИЯ:\n\n${expertOpinions}` }
+          ]
+        }),
+        config.timeout,
+        'aggregator'
+      );
+
+      if (aggregationResult.ok && aggregationResult.value?.content) {
+        // Добавляем метаинформацию в начало
+        const metadata = `*Ответ подготовлен ансамблем из ${validParts.length} экспертов*\n\n---\n\n`;
+        const finalContent = metadata + aggregationResult.value.content;
+        
+        return sseStreamText(res, finalContent);
+      } else {
+        // Если агрегация не удалась, отдаём лучший из имеющихся ответов
+        const bestAnswer = validParts.reduce((best, current) => 
+          (current.content.length > best.content.length) ? current : best
+        );
+        
+        const fallbackContent = `*Экспертное мнение: ${bestAnswer.role}*\n\n${bestAnswer.content}`;
+        return sseStreamText(res, fallbackContent);
+      }
+    } catch (aggError) {
+      // Если агрегация упала, отдаём объединённые ответы экспертов
+      const combinedContent = validParts.map((part, i) => 
+        `### ${part.role}\n\n${part.content}`
+      ).join('\n\n---\n\n');
+      
+      return sseStreamText(res, combinedContent);
+    }
+
+  } catch (error) {
+    console.error('Критическая ошибка в /api/chat_plus:', error);
+    return sendSSEError(error, 'critical_error');
+  }
+});
     // Простая версия без ансамбля - используем один запрос
     const result = await callOpenAIOnce({
       model,
