@@ -80,7 +80,19 @@ const resp = await fetch('/api/upload', {
       chat.scrollTop = chat.scrollHeight;
       return b;
     }
-
+// Если нет токена — прячем интерфейс и предлагаем регистрацию
+(function gate() {
+  const token = localStorage.getItem('gb_token') || '';
+  if (!token) {
+    const wrap = document.querySelector('.wrap');
+    wrap.innerHTML = `
+      <div class="title">Доступ только для зарегистрированных</div>
+      <div class="note">Чтобы открыть чат онлайн-помощника, пройдите регистрацию и подтвердите e-mail.</div>
+      <p><a href="/register" style="display:inline-block;padding:10px 16px;border-radius:10px;background:#10B981;color:#fff;text-decoration:none;font-weight:700">Зарегистрироваться</a></p>
+    `;
+  }
+})();
+    
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       const q = (input.value || '').trim();
