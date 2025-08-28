@@ -103,6 +103,13 @@
         const data = await r.json();
         if (!r.ok || data.error) throw new Error(data.error || 'Ошибка');
         // Сохраняем токен
+localStorage.setItem('gb_token', data.token);
+localStorage.setItem('gb_email', data.email);
+localStorage.setItem('gb_expires', String(data.expiresAt));
+
+// + СТАВИМ COOKIE, чтобы сервер пускал на /widget
+document.cookie = 'gb_token=' + encodeURIComponent(data.token) + '; Path=/; Max-Age=86400; SameSite=Lax';
+
         localStorage.setItem('gb_token', data.token);
         localStorage.setItem('gb_email', data.email);
         localStorage.setItem('gb_expires', String(data.expiresAt));
