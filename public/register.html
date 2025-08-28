@@ -10,66 +10,110 @@
     h1{font-size:20px;margin:0 0 6px;color:#1E3A8A}
     .note{font-size:13px;color:#6B7280;margin:0 0 12px}
     .card{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:16px}
-    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
-    input[type=email]{flex:1;min-width:220px;padding:10px;border:1px solid #e5e7eb;border-radius:10px}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+    input{flex:1;min-width:220px;padding:10px;border:1px solid #e5e7eb;border-radius:10px}
     button{padding:10px 16px;border:0;border-radius:10px;background:#10B981;color:#fff;font-weight:700;cursor:pointer}
     .msg{margin-top:10px;font-size:13px}
     .ok{color:#065f46}
     .err{color:#b91c1c}
     a{color:#0ea5a5;text-decoration:none}
+    .hidden{display:none}
   </style>
 </head>
 <body>
   <div class="wrap">
     <h1>Регистрация</h1>
-    <div class="note">После регистрации вы получите <b>1 день бесплатного доступа</b> к онлайн-помощнику. Затем можно выбрать тариф.</div>
+    <div class="note">Укажите данные и подтвердите e-mail — получите <b>1 день бесплатного доступа</b> к онлайн-помощнику.</div>
 
     <div class="card">
-      <div class="row">
-        <input id="email" type="email" placeholder="you@example.com" required>
-        <button id="go">Получить доступ</button>
+      <!-- ШАГ 1 -->
+      <div id="step1">
+        <div class="row">
+          <input id="name"  type="text"   placeholder="ФИО" required>
+        </div>
+        <div class="row">
+          <input id="phone" type="tel"    placeholder="+7 (999) 123-45-67" required>
+        </div>
+        <div class="row">
+          <input id="email" type="email"  placeholder="you@example.com" required>
+        </div>
+        <div class="row">
+          <button id="sendCode">Получить код</button>
+        </div>
+        <div id="msg1" class="msg"></div>
       </div>
-      <div id="msg" class="msg"></div>
+
+      <!-- ШАГ 2 -->
+      <div id="step2" class="hidden">
+        <div class="row">
+          <input id="code" type="text" inputmode="numeric" pattern="\\d{6}" maxlength="6" placeholder="Код из письма (6 цифр)" required>
+        </div>
+        <div class="row">
+          <button id="verify">Подтвердить</button>
+        </div>
+        <div id="msg2" class="msg"></div>
+      </div>
+
       <div class="msg">Уже есть доступ? Перейдите к <a href="/widget" target="_blank">чату</a>.</div>
     </div>
   </div>
 
   <script>
+    const s1 = document.getElementById('step1');
+    const s2 = document.getElementById('step2');
+    const nameEl  = document.getElementById('name');
+    const phoneEl = document.getElementById('phone');
     const emailEl = document.getElementById('email');
-    const goBtn = document.getElementById('go');
-    const msgEl = document.getElementById('msg');
+    const msg1 = document.getElementById('msg1');
+    const msg2 = document.getElementById('msg2');
 
-    goBtn.addEventListener('click', async () => {
+    document.getElementById('sendCode').addEventListener('click', async () => {
+      const name  = (nameEl.value || '').trim();
+      const phone = (phoneEl.value || '').trim();
       const email = (emailEl.value || '').trim();
-      if (!email) {
-        msgEl.textContent = 'Введите e-mail';
-        msgEl.className = 'msg err';
-        return;
-      }
-      msgEl.textContent = 'Отправляем...';
-      msgEl.className = 'msg';
-
+      msg1.textContent = 'Отправляем код...'; msg1.className = 'msg';
       try {
-        const resp = await fetch('/api/register', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email })
+        const r = await fetch('/api/register/init', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ name, phone, email })
         });
-        const data = await resp.json();
-        if (!resp.ok || data.error) throw new Error(data.error || 'Ошибка');
+        const data = await r.json();
+        if (!r.ok || data.error) throw new Error(data.error || 'Ошибка');
+        msg1.textContent = 'Код отправлен на e-mail. Проверьте почту.';
+        msg1.className = 'msg ok';
+        s1.classList.add('hidden');
+        s2.classList.remove('hidden');
+      } catch(e) {
+        msg1.textContent = 'Ошибка: ' + e.message;
+        msg1.className = 'msg err';
+      }
+    });
 
-        // Сохраняем токен в localStorage (MVP)
+    document.getElementById('verify').addEventListener('click', async () => {
+      const email = (emailEl.value || '').trim();
+      const code  = (document.getElementById('code').value || '').trim();
+      msg2.textContent = 'Проверяем...'; msg2.className = 'msg';
+      try {
+        const r = await fetch('/api/register/verify', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ email, code })
+        });
+        const data = await r.json();
+        if (!r.ok || data.error) throw new Error(data.error || 'Ошибка');
+        // Сохраняем токен
         localStorage.setItem('gb_token', data.token);
         localStorage.setItem('gb_email', data.email);
         localStorage.setItem('gb_expires', String(data.expiresAt));
-
-        msgEl.innerHTML = 'Готово! Доступ активирован на 1 день.<br>Можно открыть <a href="/widget" target="_blank">чат</a>.';
-        msgEl.className = 'msg ok';
-      } catch (e) {
-        msgEl.textContent = 'Ошибка: ' + e.message;
-        msgEl.className = 'msg err';
+        msg2.innerHTML = 'Готово! Доступ активирован на 1 день.<br>Можно открыть <a href="/widget" target="_blank">чат</a>.';
+        msg2.className = 'msg ok';
+      } catch(e) {
+        msg2.textContent = 'Ошибка: ' + e.message;
+        msg2.className = 'msg err';
       }
     });
   </script>
 </body>
 </html>
+
