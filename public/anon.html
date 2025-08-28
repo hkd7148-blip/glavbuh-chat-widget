@@ -5,87 +5,612 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Обезличивание документов</title>
   <style>
-    body{margin:0;background:#f7f8fb;font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Arial;color:#111827}
-    .wrap{max-width:860px;margin:0 auto;padding:16px}
-    h1{font-size:20px;margin:0 0 6px;color:#1E3A8A}
-    .note{font-size:13px;color:#6B7280;margin:0 0 12px}
-    .card{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:16px}
-    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
-    input[type=file]{padding:8px;border:1px solid #e5e7eb;border-radius:10px;background:#fff}
-    button{padding:10px 16px;border:0;border-radius:10px;background:#10B981;color:#fff;font-weight:700;cursor:pointer}
-    .muted{font-size:12px;color:#6B7280}
-    .ok{color:#065f46}
-    .err{color:#b91c1c}
-    .hint{margin-top:10px;font-size:13px;color:#374151}
-    .link{color:#0ea5a5;text-decoration:none}
+    * { box-sizing: border-box; }
+    
+    body {
+      margin: 0;
+      background: linear-gradient(135deg, #f7f8fb 0%, #f1f5f9 100%);
+      font: 16px/1.5 system-ui, -apple-system, Segoe UI, Roboto, Arial;
+      color: #111827;
+      min-height: 100vh;
+    }
+    
+    .wrap {
+      max-width: 860px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+    
+    h1 {
+      font-size: 28px;
+      margin: 0 0 8px;
+      color: #1E3A8A;
+      font-weight: 700;
+      text-align: center;
+    }
+    
+    .note {
+      font-size: 14px;
+      color: #6B7280;
+      margin: 0 0 24px;
+      text-align: center;
+      max-width: 600px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    
+    .card {
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 16px;
+      padding: 24px;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+      transition: all 0.3s ease;
+    }
+    
+    .upload-zone {
+      border: 2px dashed #d1d5db;
+      border-radius: 12px;
+      padding: 40px 20px;
+      text-align: center;
+      transition: all 0.3s ease;
+      cursor: pointer;
+      margin-bottom: 20px;
+      position: relative;
+      background: #fafafa;
+    }
+    
+    .upload-zone:hover {
+      border-color: #10B981;
+      background: #f0fdf4;
+    }
+    
+    .upload-zone.dragover {
+      border-color: #10B981;
+      background: #ecfdf5;
+      transform: scale(1.02);
+    }
+    
+    .upload-icon {
+      font-size: 48px;
+      color: #9ca3af;
+      margin-bottom: 12px;
+      transition: color 0.3s ease;
+    }
+    
+    .upload-zone:hover .upload-icon {
+      color: #10B981;
+    }
+    
+    .upload-text {
+      font-size: 16px;
+      color: #374151;
+      margin-bottom: 8px;
+      font-weight: 600;
+    }
+    
+    .upload-hint {
+      font-size: 14px;
+      color: #6b7280;
+      margin-bottom: 16px;
+    }
+    
+    .file-types {
+      font-size: 12px;
+      color: #9ca3af;
+      margin-bottom: 16px;
+    }
+    
+    #file {
+      display: none;
+    }
+    
+    .file-info {
+      background: #f3f4f6;
+      border-radius: 8px;
+      padding: 12px;
+      margin: 16px 0;
+      display: none;
+      align-items: center;
+      gap: 12px;
+    }
+    
+    .file-info.show {
+      display: flex;
+    }
+    
+    .file-icon {
+      font-size: 24px;
+    }
+    
+    .file-details {
+      flex: 1;
+    }
+    
+    .file-name {
+      font-weight: 600;
+      color: #111827;
+      margin-bottom: 4px;
+    }
+    
+    .file-size {
+      font-size: 12px;
+      color: #6b7280;
+    }
+    
+    .remove-file {
+      background: none;
+      border: none;
+      color: #ef4444;
+      cursor: pointer;
+      padding: 4px;
+      border-radius: 4px;
+      font-size: 18px;
+    }
+    
+    .remove-file:hover {
+      background: #fef2f2;
+    }
+    
+    .controls {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: center;
+    }
+    
+    button {
+      padding: 12px 24px;
+      border: 0;
+      border-radius: 12px;
+      background: #10B981;
+      color: #fff;
+      font-weight: 600;
+      cursor: pointer;
+      font-size: 16px;
+      transition: all 0.3s ease;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 160px;
+      justify-content: center;
+    }
+    
+    button:hover:not(:disabled) {
+      background: #059669;
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+    }
+    
+    button:disabled {
+      background: #9ca3af;
+      cursor: not-allowed;
+      transform: none;
+      box-shadow: none;
+    }
+    
+    .spinner {
+      width: 16px;
+      height: 16px;
+      border: 2px solid transparent;
+      border-top: 2px solid currentColor;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+    
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    
+    .progress-bar {
+      width: 100%;
+      height: 6px;
+      background: #e5e7eb;
+      border-radius: 3px;
+      margin: 16px 0;
+      overflow: hidden;
+      display: none;
+    }
+    
+    .progress-bar.show {
+      display: block;
+    }
+    
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #10B981, #059669);
+      border-radius: 3px;
+      width: 0%;
+      transition: width 0.3s ease;
+    }
+    
+    #status {
+      margin-top: 16px;
+      font-size: 14px;
+      text-align: center;
+      padding: 8px;
+      border-radius: 8px;
+      transition: all 0.3s ease;
+    }
+    
+    .status-ok {
+      background: #ecfdf5;
+      color: #065f46;
+      border: 1px solid #a7f3d0;
+    }
+    
+    .status-error {
+      background: #fef2f2;
+      color: #b91c1c;
+      border: 1px solid #fca5a5;
+    }
+    
+    .status-processing {
+      background: #fffbeb;
+      color: #d97706;
+      border: 1px solid #fed7aa;
+    }
+    
+    .hint {
+      margin-top: 20px;
+      font-size: 13px;
+      color: #374151;
+      text-align: center;
+      padding: 16px;
+      background: #f9fafb;
+      border-radius: 12px;
+      border: 1px solid #e5e7eb;
+    }
+    
+    .link {
+      color: #0ea5e9;
+      text-decoration: none;
+      font-weight: 600;
+    }
+    
+    .link:hover {
+      text-decoration: underline;
+    }
+    
+    .warning {
+      margin-top: 16px;
+      font-size: 12px;
+      color: #d97706;
+      background: #fffbeb;
+      padding: 12px;
+      border-radius: 8px;
+      border: 1px solid #fed7aa;
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+    }
+    
+    .warning-icon {
+      font-size: 16px;
+      margin-top: 1px;
+    }
+    
+    @media (max-width: 640px) {
+      .wrap {
+        padding: 16px;
+      }
+      
+      h1 {
+        font-size: 24px;
+      }
+      
+      .card {
+        padding: 20px;
+      }
+      
+      .upload-zone {
+        padding: 30px 16px;
+      }
+      
+      .controls {
+        flex-direction: column;
+      }
+      
+      button {
+        width: 100%;
+      }
+    }
   </style>
 </head>
 <body>
   <div class="wrap">
     <h1>Обезличивание документов</h1>
-    <div class="note">Загрузите PDF, DOCX или TXT — мы изъём текст, автоматически маскируем персональные и платёжные данные и отдадим вам .txt для скачивания.</div>
-
+    <div class="note">
+      Загрузите PDF, DOCX или TXT — мы извлечём текст, автоматически маскируем персональные и платёжные данные и отдадим вам .txt для скачивания.
+    </div>
+    
     <div class="card">
-      <div class="row">
-        <input id="file" type="file" accept=".pdf,.docx,.txt">
-        <button id="go">Обезличить и скачать</button>
+      <div class="upload-zone" id="uploadZone">
+        <div class="upload-icon">📄</div>
+        <div class="upload-text">Выберите файл или перетащите сюда</div>
+        <div class="upload-hint">Максимальный размер: 10 МБ</div>
+        <div class="file-types">Поддерживаемые форматы: PDF, DOCX, TXT</div>
       </div>
-      <div id="status" class="hint"></div>
-      <div class="hint">После обезличивания вы можете прикрепить полученный .txt в <a class="link" href="/widget" target="_blank">чат-помощник</a>.</div>
-      <div class="muted" style="margin-top:10px">
-        ⚠️ Если ваш PDF — скан (картинка), текст не извлечётся. Сначала распознайте его в PDF (OCR) и попробуйте снова.
+      
+      <input id="file" type="file" accept=".pdf,.docx,.txt">
+      
+      <div class="file-info" id="fileInfo">
+        <div class="file-icon" id="fileIcon">📄</div>
+        <div class="file-details">
+          <div class="file-name" id="fileName"></div>
+          <div class="file-size" id="fileSize"></div>
+        </div>
+        <button type="button" class="remove-file" id="removeFile" title="Удалить файл">×</button>
+      </div>
+      
+      <div class="progress-bar" id="progressBar">
+        <div class="progress-fill" id="progressFill"></div>
+      </div>
+      
+      <div class="controls">
+        <button id="go">
+          <span id="buttonText">Обезличить и скачать</span>
+        </button>
+      </div>
+      
+      <div id="status"></div>
+      
+      <div class="hint">
+        После обезличивания вы можете прикрепить полученный .txt в 
+        <a class="link" href="/widget" target="_blank">чат-помощник</a>.
+      </div>
+      
+      <div class="warning">
+        <div class="warning-icon">⚠️</div>
+        <div>
+          Если ваш PDF — скан (картинка), текст не извлечётся. 
+          Сначала распознайте его в PDF (OCR) и попробуйте снова.
+        </div>
       </div>
     </div>
   </div>
 
   <script>
     const fileEl = document.getElementById('file');
-    const goBtn  = document.getElementById('go');
+    const goBtn = document.getElementById('go');
+    const buttonText = document.getElementById('buttonText');
     const statusEl = document.getElementById('status');
+    const uploadZone = document.getElementById('uploadZone');
+    const fileInfo = document.getElementById('fileInfo');
+    const fileName = document.getElementById('fileName');
+    const fileSize = document.getElementById('fileSize');
+    const fileIcon = document.getElementById('fileIcon');
+    const removeFile = document.getElementById('removeFile');
+    const progressBar = document.getElementById('progressBar');
+    const progressFill = document.getElementById('progressFill');
 
-    goBtn.addEventListener('click', async () => {
-      const f = fileEl.files[0];
-      if (!f) {
-        statusEl.textContent = 'Выберите файл.';
-        statusEl.className = 'hint err';
-        return;
+    // Конфигурация
+    const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 МБ
+    const ALLOWED_TYPES = [
+      'application/pdf',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'text/plain'
+    ];
+    
+    const FILE_ICONS = {
+      'application/pdf': '📕',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '📘',
+      'text/plain': '📄'
+    };
+
+    let currentFile = null;
+    let isProcessing = false;
+
+    // Форматирование размера файла
+    function formatFileSize(bytes) {
+      if (bytes === 0) return '0 Bytes';
+      const k = 1024;
+      const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    }
+
+    // Валидация файла
+    function validateFile(file) {
+      if (!file) {
+        throw new Error('Файл не выбран');
       }
-      statusEl.textContent = 'Обработка…';
-      statusEl.className = 'hint';
 
+      if (file.size > MAX_FILE_SIZE) {
+        throw new Error('Размер файла превышает 10 МБ');
+      }
+
+      if (!ALLOWED_TYPES.includes(file.type)) {
+        throw new Error('Неподдерживаемый тип файла. Используйте PDF, DOCX или TXT');
+      }
+
+      return true;
+    }
+
+    // Показ информации о файле
+    function showFileInfo(file) {
+      fileName.textContent = file.name;
+      fileSize.textContent = formatFileSize(file.size);
+      fileIcon.textContent = FILE_ICONS[file.type] || '📄';
+      fileInfo.classList.add('show');
+      uploadZone.style.display = 'none';
+    }
+
+    // Скрытие информации о файле
+    function hideFileInfo() {
+      fileInfo.classList.remove('show');
+      uploadZone.style.display = 'block';
+      currentFile = null;
+      fileEl.value = '';
+    }
+
+    // Установка статуса
+    function setStatus(message, type = '') {
+      statusEl.textContent = message;
+      statusEl.className = type ? `status-${type}` : '';
+    }
+
+    // Установка состояния обработки
+    function setProcessingState(processing) {
+      isProcessing = processing;
+      goBtn.disabled = processing;
+      
+      if (processing) {
+        buttonText.innerHTML = '<div class="spinner"></div>Обработка...';
+        progressBar.classList.add('show');
+      } else {
+        buttonText.textContent = 'Обезличить и скачать';
+        progressBar.classList.remove('show');
+        progressFill.style.width = '0%';
+      }
+    }
+
+    // Обработка выбора файла
+    function handleFileSelect(file) {
       try {
-        const fd = new FormData();
-        fd.append('file', f);
-        const resp = await fetch('/api/anon', { method: 'POST', body: fd });
+        validateFile(file);
+        currentFile = file;
+        showFileInfo(file);
+        setStatus('');
+      } catch (error) {
+        setStatus(error.message, 'error');
+        hideFileInfo();
+      }
+    }
 
-        if (!resp.ok) {
-          const data = await resp.json().catch(()=>({}));
-          throw new Error(data.error || 'Ошибка сервера');
-        }
-
-        const blob = await resp.blob();
-        const url = URL.createObjectURL(blob);
-
-        // Вытащим имя из заголовка
-        const cd = resp.headers.get('Content-Disposition') || '';
-        const m = cd.match(/filename="([^"]+)"/);
-        const fname = m ? m[1] : (f.name.replace(/\.[^.]+$/, '') + '-anon.txt');
-
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = fname;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
-
-        statusEl.textContent = 'Готово. Файл скачан.';
-        statusEl.className = 'hint ok';
-      } catch (e) {
-        statusEl.textContent = 'Ошибка: ' + e.message;
-        statusEl.className = 'hint err';
+    // Drag & Drop functionality
+    uploadZone.addEventListener('click', () => {
+      if (!isProcessing) {
+        fileEl.click();
       }
     });
+
+    uploadZone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      uploadZone.classList.add('dragover');
+    });
+
+    uploadZone.addEventListener('dragleave', () => {
+      uploadZone.classList.remove('dragover');
+    });
+
+    uploadZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      uploadZone.classList.remove('dragover');
+      
+      const files = e.dataTransfer.files;
+      if (files.length > 0 && !isProcessing) {
+        handleFileSelect(files[0]);
+      }
+    });
+
+    fileEl.addEventListener('change', (e) => {
+      if (e.target.files[0]) {
+        handleFileSelect(e.target.files[0]);
+      }
+    });
+
+    removeFile.addEventListener('click', (e) => {
+      e.preventDefault();
+      hideFileInfo();
+      setStatus('');
+    });
+
+    // Основная обработка
+    goBtn.addEventListener('click', async () => {
+      if (!currentFile) {
+        setStatus('Выберите файл для обработки', 'error');
+        return;
+      }
+
+      if (isProcessing) return;
+
+      setProcessingState(true);
+      setStatus('Загрузка и обработка файла...', 'processing');
+
+      try {
+        const formData = new FormData();
+        formData.append('file', currentFile);
+
+        // Симуляция прогресса (поскольку fetch не поддерживает progress для upload)
+        let progress = 0;
+        const progressInterval = setInterval(() => {
+          progress += Math.random() * 15;
+          if (progress > 90) {
+            progress = 90;
+            clearInterval(progressInterval);
+          }
+          progressFill.style.width = progress + '%';
+        }, 200);
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 секунд timeout
+
+        const response = await fetch('/api/anon', {
+          method: 'POST',
+          body: formData,
+          signal: controller.signal
+        });
+
+        clearTimeout(timeoutId);
+        clearInterval(progressInterval);
+        progressFill.style.width = '100%';
+
+        if (!response.ok) {
+          let errorMessage = 'Ошибка сервера';
+          try {
+            const errorData = await response.json();
+            errorMessage = errorData.error || errorMessage;
+          } catch {
+            errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+          }
+          throw new Error(errorMessage);
+        }
+
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+
+        // Извлечение имени файла из заголовка
+        const contentDisposition = response.headers.get('Content-Disposition') || '';
+        const fileNameMatch = contentDisposition.match(/filename="([^"]+)"/);
+        const downloadFileName = fileNameMatch 
+          ? fileNameMatch[1] 
+          : currentFile.name.replace(/\.[^.]+$/, '') + '-anon.txt';
+
+        // Создание и клик по ссылке скачивания
+        const downloadLink = document.createElement('a');
+        downloadLink.href = url;
+        downloadLink.download = downloadFileName;
+        document.body.appendChild(downloadLink);
+        downloadLink.click();
+        downloadLink.remove();
+        URL.revokeObjectURL(url);
+
+        setStatus('✅ Файл успешно обезличен и скачан!', 'ok');
+        
+        // Автоматически скрыть файл через 3 секунды
+        setTimeout(() => {
+          hideFileInfo();
+          setStatus('');
+        }, 3000);
+
+      } catch (error) {
+        if (error.name === 'AbortError') {
+          setStatus('Время ожидания истекло. Попробуйте позже', 'error');
+        } else if (error.message.includes('NetworkError') || error.message.includes('Failed to fetch')) {
+          setStatus('Ошибка соединения. Проверьте интернет', 'error');
+        } else {
+          setStatus('Ошибка: ' + error.message, 'error');
+        }
+      } finally {
+        setProcessingState(false);
+      }
+    });
+
+    // Предотвращение стандартного поведения drag & drop для всей страницы
+    document.addEventListener('dragover', (e) => e.preventDefault());
+    document.addEventListener('drop', (e) => e.preventDefault());
   </script>
 </body>
 </html>
