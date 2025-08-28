@@ -15,15 +15,92 @@ const app = express();
 // === Простейшие аккаунты/токены в памяти (MVP) ===
 const accounts = new Map(); // email -> { expiresAt: number, token: string }
 const tokens   = new Map(); // token -> { email: string, expiresAt: number }
-// === Проверка токена (MVP) ===
-// tokens: Map<token, { email, expiresAt }>
-function getTokenInfo(token='') {
-  if (!token) return null;
-  const rec = tokens.get(token);
-  if (!rec) return null;
-  if (Date.now() > rec.expiresAt) return null;
-  return rec;
+// === Регистрация с подтверждением кода ===
+const pending = new Map(); // email -> { name, phone, code, expiresAt, lastSentAt }
+
+// Генерация 6-значного кода
+function genCode() {
+  return String(Math.floor(100000 + Math.random()*900000));
 }
+
+function isValidEmail(e='') {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e.toLowerCase());
+}
+function isValidPhone(p='') {
+  // простой допуск: цифры, пробелы, +, скобки и дефисы; длина цифр >= 10
+  const digits = (p.match(/\d/g) || []).length;
+  return digits >= 10 && digits <= 15;
+}
+
+// ШАГ 1: Принять ФИО/телефон/email, сгенерировать код и отправить письмо
+app.post('/api/register/init', express.json(), async (req, res) => {
+  try {
+    const name  = String(req.body?.name  || '').trim();
+    const phone = String(req.body?.phone || '').trim();
+    const email = String(req.body?.email || '').trim().toLowerCase();
+
+    if (!name || name.length < 3)  return res.status(400).json({ error: 'Укажите ФИО' });
+    if (!isValidPhone(phone))      return res.status(400).json({ error: 'Укажите корректный телефон' });
+    if (!isValidEmail(email))      return res.status(400).json({ error: 'Укажите корректный e-mail' });
+
+    // антиспам: не чаще раза в 60 секунд
+    const old = pending.get(email);
+    if (old && Date.now() - (old.lastSentAt || 0) < 60000) {
+      return res.status(429).json({ error: 'Код уже отправлен. Попробуйте через минуту.' });
+    }
+
+    const code = genCode();
+    const expiresAt = Date.now() + 1000 * 60 * 10; // 10 минут
+    pending.set(email, { name, phone, code, expiresAt, lastSentAt: Date.now() });
+
+    // Письмо
+    const subject = 'Код подтверждения — Ваш ГлавБух';
+    const text = `Здравствуйте, ${name}!\n\nВаш код подтверждения: ${code}\nСрок действия: 10 минут.\n\nЕсли вы не запрашивали код, просто игнорируйте это письмо.`;
+
+    await sendEmail(email, subject, text);
+
+    // Чистим протухшие записи
+    for (const [k, v] of pending) if (Date.now() > v.expiresAt) pending.delete(k);
+
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(400).json({ error: String(e.message || e) });
+  }
+});
+
+// ШАГ 2: Проверить код и выдать токен + 1 день доступа
+app.post('/api/register/verify', express.json(), (req, res) => {
+  try {
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    const code  = String(req.body?.code  || '').trim();
+
+    if (!isValidEmail(email)) return res.status(400).json({ error: 'E-mail некорректен' });
+    if (!/^\d{6}$/.test(code)) return res.status(400).json({ error: 'Код должен быть 6 цифр' });
+
+    const rec = pending.get(email);
+    if (!rec) return res.status(400).json({ error: 'Код не найден. Запросите новый.' });
+    if (Date.now() > rec.expiresAt) {
+      pending.delete(email);
+      return res.status(400).json({ error: 'Срок действия кода истёк. Запросите новый.' });
+    }
+    if (rec.code !== code) return res.status(400).json({ error: 'Неверный код' });
+
+    // Всё ок — выдаём токен и день доступа
+    const ttlMs = 1000 * 60 * 60 * 24; // 1 день
+    const expiresAt = Date.now() + ttlMs;
+    const token = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+
+    accounts.set(email, { expiresAt, token, name: rec.name, phone: rec.phone });
+    tokens.set(token,   { email, expiresAt });
+
+    pending.delete(email);
+
+    return res.json({ ok: true, email, token, expiresAt });
+  } catch (e) {
+    return res.status(400).json({ error: String(e.message || e) });
+  }
+});
+
 
 // middleware: доступ обязателен
 function authRequired(req, res, next) {
