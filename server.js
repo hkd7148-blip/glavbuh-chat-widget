@@ -4,7 +4,6 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import multer from 'multer';
 import mammoth from 'mammoth';
-// PDF: pdfjs-dist для извлечения текста
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -12,125 +11,19 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 
-// === Простейшие аккаунты/токены в памяти (MVP) ===
-const accounts = new Map(); // email -> { expiresAt: number, token: string }
-const tokens   = new Map(); // token -> { email: string, expiresAt: number }
-// === Регистрация с подтверждением кода ===
-const pending = new Map(); // email -> { name, phone, code, expiresAt, lastSentAt }
+/* ================== ХРАНИЛИЩА В ПАМЯТИ (MVP) ================== */
+const attachments = new Map(); // id -> { text, name, expiresAt }
+const accounts    = new Map(); // email -> { expiresAt, token, name, phone }
+const tokens      = new Map(); // token -> { email, expiresAt }
+const pending     = new Map(); // email -> { name, phone, code, expiresAt, lastSentAt }
 
-// Генерация 6-значного кода
-function genCode() {
-  return String(Math.floor(100000 + Math.random()*900000));
-}
-
-function isValidEmail(e='') {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e.toLowerCase());
-}
-function isValidPhone(p='') {
-  // простой допуск: цифры, пробелы, +, скобки и дефисы; длина цифр >= 10
-  const digits = (p.match(/\d/g) || []).length;
-  return digits >= 10 && digits <= 15;
-}
-
-// ШАГ 1: Принять ФИО/телефон/email, сгенерировать код и отправить письмо
-app.post('/api/register/init', express.json(), async (req, res) => {
-  try {
-    const name  = String(req.body?.name  || '').trim();
-    const phone = String(req.body?.phone || '').trim();
-    const email = String(req.body?.email || '').trim().toLowerCase();
-
-    if (!name || name.length < 3)  return res.status(400).json({ error: 'Укажите ФИО' });
-    if (!isValidPhone(phone))      return res.status(400).json({ error: 'Укажите корректный телефон' });
-    if (!isValidEmail(email))      return res.status(400).json({ error: 'Укажите корректный e-mail' });
-
-    // антиспам: не чаще раза в 60 секунд
-    const old = pending.get(email);
-    if (old && Date.now() - (old.lastSentAt || 0) < 60000) {
-      return res.status(429).json({ error: 'Код уже отправлен. Попробуйте через минуту.' });
-    }
-
-    const code = genCode();
-    const expiresAt = Date.now() + 1000 * 60 * 10; // 10 минут
-    pending.set(email, { name, phone, code, expiresAt, lastSentAt: Date.now() });
-
-    // Письмо
-    const subject = 'Код подтверждения — Ваш ГлавБух';
-    const text = `Здравствуйте, ${name}!\n\nВаш код подтверждения: ${code}\nСрок действия: 10 минут.\n\nЕсли вы не запрашивали код, просто игнорируйте это письмо.`;
-
-    await sendEmail(email, subject, text);
-
-    // Чистим протухшие записи
-    for (const [k, v] of pending) if (Date.now() > v.expiresAt) pending.delete(k);
-
-    return res.json({ ok: true });
-  } catch (e) {
-    return res.status(400).json({ error: String(e.message || e) });
-  }
-});
-
-// ШАГ 2: Проверить код и выдать токен + 1 день доступа
-app.post('/api/register/verify', express.json(), (req, res) => {
-  try {
-    const email = String(req.body?.email || '').trim().toLowerCase();
-    const code  = String(req.body?.code  || '').trim();
-
-    if (!isValidEmail(email)) return res.status(400).json({ error: 'E-mail некорректен' });
-    if (!/^\d{6}$/.test(code)) return res.status(400).json({ error: 'Код должен быть 6 цифр' });
-
-    const rec = pending.get(email);
-    if (!rec) return res.status(400).json({ error: 'Код не найден. Запросите новый.' });
-    if (Date.now() > rec.expiresAt) {
-      pending.delete(email);
-      return res.status(400).json({ error: 'Срок действия кода истёк. Запросите новый.' });
-    }
-    if (rec.code !== code) return res.status(400).json({ error: 'Неверный код' });
-
-    // Всё ок — выдаём токен и день доступа
-    const ttlMs = 1000 * 60 * 60 * 24; // 1 день
-    const expiresAt = Date.now() + ttlMs;
-    const token = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
-
-    accounts.set(email, { expiresAt, token, name: rec.name, phone: rec.phone });
-    tokens.set(token,   { email, expiresAt });
-
-    pending.delete(email);
-
-    return res.json({ ok: true, email, token, expiresAt });
-  } catch (e) {
-    return res.status(400).json({ error: String(e.message || e) });
-  }
-});
-
-
-// middleware: доступ обязателен
-function authRequired(req, res, next) {
-  const token = req.headers['x-gb-token'] || '';
-  const info = getTokenInfo(String(token));
-  if (!info) {
-    return res.status(401).json({
-      error: 'auth_required',
-      message: 'Доступ к онлайн-помощнику только после регистрации или продления.'
-    });
-  }
-  // можно пробросить email дальше
-  req.user = { email: info.email, expiresAt: info.expiresAt };
-  next();
-}
-
-function isValidEmail(e='') {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e.toLowerCase());
-}
-
-// === Хранилище вложений (в памяти) ===
-const attachments = new Map();
-
-// Настройка загрузки файлов (до 10 МБ)
+/* ================== ЗАГРУЗКА ФАЙЛОВ ================== */
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }
+  limits: { fileSize: 10 * 1024 * 1024 } // 10 МБ
 });
 
-// === Вспомогательные функции ===
+/* ================== УТИЛИТЫ ================== */
 function clampText(s, max = 8000) {
   if (!s) return '';
   s = s.replace(/\r/g, '');
@@ -153,12 +46,8 @@ async function extractPdfText(buffer) {
 
 async function extractTextFrom(file) {
   const name = (file.originalname || '').toLowerCase();
-  if (name.endsWith('.txt')) {
-    return file.buffer.toString('utf8');
-  }
-  if (name.endsWith('.pdf')) {
-    return await extractPdfText(file.buffer);
-  }
+  if (name.endsWith('.txt'))  return file.buffer.toString('utf8');
+  if (name.endsWith('.pdf'))  return await extractPdfText(file.buffer);
   if (name.endsWith('.docx')) {
     const { value } = await mammoth.extractRawText({ buffer: file.buffer });
     return value || '';
@@ -166,33 +55,78 @@ async function extractTextFrom(file) {
   throw new Error('Неподдерживаемый формат. Разрешены: PDF, DOCX, TXT');
 }
 
-// === Функция маскирования PII ===
 function redactPII(text) {
   if (!text) return '';
   let t = text;
-
-  t = t.replace(/\b\d{2}\s?\d{2}\s?\d{6}\b/g, '[скрыто:паспорт]');
-  t = t.replace(/\b\d{3}-\d{3}-\d{3}\s?\d{2}\b/g, '[скрыто:СНИЛС]');
-  t = t.replace(/\b\d{10,12}\b/g, '[скрыто:ИНН/СНИЛС]');
-  t = t.replace(/\b\d{13}\b/g, '[скрыто:ОГРН]');
-  t = t.replace(/\b\d{15}\b/g, '[скрыто:ОГРНИП]');
-  t = t.replace(/\b\d{9}\b/g, '[скрыто:БИК]');
-  t = t.replace(/\b(?:\d[ -]?){16,20}\b/g, '[скрыто:счёт/карта]');
-  t = t.replace(/\+?\d[\d\s()-]{7,}\d/g, '[скрыто:тел]');
-  t = t.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[скрыто:email]');
+  t = t.replace(/\b\d{2}\s?\d{2}\s?\d{6}\b/g, '[скрыто:паспорт]');         // паспорт РФ
+  t = t.replace(/\b\d{3}-\d{3}-\d{3}\s?\d{2}\b/g, '[скрыто:СНИЛС]');        // СНИЛС
+  t = t.replace(/\b\d{10,12}\b/g, '[скрыто:ИНН/СНИЛС]');                    // ИНН/СНИЛС цифры
+  t = t.replace(/\b\d{13}\b/g, '[скрыто:ОГРН]');                            // ОГРН
+  t = t.replace(/\b\d{15}\b/g, '[скрыто:ОГРНИП]');                          // ОГРНИП
+  t = t.replace(/\b\d{9}\b/g, '[скрыто:БИК]');                               // БИК
+  t = t.replace(/\b(?:\d[ -]?){16,20}\b/g, '[скрыто:счёт/карта]');          // карты/счета
+  t = t.replace(/\+?\d[\d\s()-]{7,}\d/g, '[скрыто:тел]');                    // телефоны
+  t = t.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[скрыто:email]');// email
   t = t.replace(/\b(ул\.|улица|пр-т|проспект|пер\.|переулок|д\.|дом|кв\.|квартира)\s+[^\n,;]+/gi, '[скрыто:адрес]');
-  t = t.replace(/\b[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+){1,2}\b/g, '[скрыто:ФИО]');
-
+  t = t.replace(/\b[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+){1,2}\b/g, '[скрыто:ФИО]'); // грубо ФИО
   return t;
 }
 
-// === Маршрут: загрузка файла ===
-app.post('/api/upload', upload.single('file'), async (req, res) => {
+function genCode() {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+function isValidEmail(e = '') {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e.toLowerCase());
+}
+function isValidPhone(p = '') {
+  const digits = (p.match(/\d/g) || []).length;
+  return digits >= 10 && digits <= 15;
+}
+
+async function sendEmail(to, subject, text) {
+  const apiKey = process.env.RESEND_API_KEY;
+  const from = process.env.FROM_EMAIL || 'onboarding@resend.dev';
+  if (!apiKey) throw new Error('RESEND_API_KEY не задан');
+
+  const resp = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ from, to, subject, text })
+  });
+  if (!resp.ok) {
+    const t = await resp.text().catch(() => '');
+    throw new Error('Resend error: ' + t);
+  }
+}
+
+/* ================== АВТОРИЗАЦИЯ (MVP) ================== */
+function getTokenInfo(token = '') {
+  if (!token) return null;
+  const rec = tokens.get(token);
+  if (!rec) return null;
+  if (Date.now() > rec.expiresAt) return null;
+  return rec;
+}
+function authRequired(req, res, next) {
+  const token = req.headers['x-gb-token'] || '';
+  const info = getTokenInfo(String(token));
+  if (!info) {
+    return res.status(401).json({
+      error: 'auth_required',
+      message: 'Доступ к онлайн-помощнику только после регистрации или продления.'
+    });
+  }
+  req.user = { email: info.email, expiresAt: info.expiresAt };
+  next();
+}
+
+/* ================== API: ЗАГРУЗКА ДЛЯ ЧАТА ================== */
+app.post('/api/upload', authRequired, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'Файл не получен' });
-    app.post('/api/upload', authRequired, upload.single('file'), async (req, res) => {
-  // ...как было...
-});
 
     const raw = await extractTextFrom(req.file);
     const text = clampText(raw, 8000);
@@ -206,9 +140,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
     const ttlMs = 1000 * 60 * 15;
     attachments.set(id, { text: safe, name: req.file.originalname, expiresAt: Date.now() + ttlMs });
 
-    for (const [key, v] of attachments) {
-      if (Date.now() > v.expiresAt) attachments.delete(key);
-    }
+    for (const [key, v] of attachments) if (Date.now() > v.expiresAt) attachments.delete(key);
 
     return res.json({ id, name: req.file.originalname, length: safe.length });
   } catch (e) {
@@ -216,22 +148,20 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
   }
 });
 
-// === Маршрут: чат ===
-app.post('/api/chat', express.json(), async (req, res) => {
+/* ================== API: ЧАТ ================== */
+app.post('/api/chat', authRequired, express.json(), async (req, res) => {
   try {
     const { messages, attachmentId } = req.body || {};
     if (!Array.isArray(messages)) {
       return res.status(400).json({ error: 'messages must be an array' });
     }
-app.post('/api/chat', authRequired, express.json(), async (req, res) => {
-  // ...весь код как был...
-});
 
     let attachmentNote = '';
     if (attachmentId && attachments.has(attachmentId)) {
       const a = attachments.get(attachmentId);
       attachmentNote = `\n\nВложенный текст (обезличенный, до 8k):\n${a.text}`;
     }
+
     const systemPrompt = `Ты — онлайн-помощник главного бухгалтера для РФ. Отвечай кратко и по делу, по-русски.
 Если вопрос требует персональных данных — попроси обезличить и предложи инструмент /anonimize/.1. Назначение чат-бота
 Чат-бот — интеллектуальный помощник, созданный для поддержки главных бухгалтеров и сотрудников бухгалтерии. Он предоставляет консультации по вопросам налогообложения, учета и законодательства.
@@ -285,8 +215,7 @@ app.post('/api/chat', authRequired, express.json(), async (req, res) => {
 Информация актуальна на 30 июля 2025 года. Уточняйте при необходимости.
 9. Заключение
 Чат-бот — удобный инструмент для быстрого решения типовых задач главного бухгалтера. Он экономит время. Используй вложенный текст ниже как контекст, если он релевантен.${attachmentNote}`;
-    // Готовим запрос к OpenAI (в Node 18 fetch доступен без доп. пакетов)
-    const body = {
+   const body = {
       model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
       stream: true,
       messages: [
@@ -351,7 +280,7 @@ app.post('/api/chat', authRequired, express.json(), async (req, res) => {
   }
 });
 
-// === Маршрут: обезличивание ===
+/* ================== API: ОБЕЗЛИЧИВАНИЕ (ОТКРЫТО) ================== */
 app.post('/api/anon', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'Файл не получен' });
@@ -370,28 +299,62 @@ app.post('/api/anon', upload.single('file'), async (req, res) => {
     return res.status(400).json({ error: String(e.message || e) });
   }
 });
-// === Регистрация: выдаём 1 день trial и токен ===
-app.post('/api/register', express.json(), (req, res) => {
+
+/* ================== API: РЕГИСТРАЦИЯ (2 ШАГА) ================== */
+// Шаг 1 — отправка кода
+app.post('/api/register/init', express.json(), async (req, res) => {
   try {
+    const name  = String(req.body?.name  || '').trim();
+    const phone = String(req.body?.phone || '').trim();
     const email = String(req.body?.email || '').trim().toLowerCase();
-    if (!isValidEmail(email)) {
-      return res.status(400).json({ error: 'Укажите корректный e-mail' });
+
+    if (!name || name.length < 3)  return res.status(400).json({ error: 'Укажите ФИО' });
+    if (!isValidPhone(phone))      return res.status(400).json({ error: 'Укажите корректный телефон' });
+    if (!isValidEmail(email))      return res.status(400).json({ error: 'Укажите корректный e-mail' });
+
+    const old = pending.get(email);
+    if (old && Date.now() - (old.lastSentAt || 0) < 60000) {
+      return res.status(429).json({ error: 'Код уже отправлен. Попробуйте через минуту.' });
     }
 
-    // 1 день тест-доступа
-    const ttlMs = 1000 * 60 * 60 * 24;
-    const expiresAt = Date.now() + ttlMs;
+    const code = genCode();
+    const expiresAt = Date.now() + 1000 * 60 * 10; // 10 минут
+    pending.set(email, { name, phone, code, expiresAt, lastSentAt: Date.now() });
 
-    // Генерим токен
+    const subject = 'Код подтверждения — Ваш ГлавБух';
+    const text = `Здравствуйте, ${name}!\n\nВаш код подтверждения: ${code}\nСрок действия: 10 минут.\n\nЕсли вы не запрашивали код, просто игнорируйте это письмо.`;
+
+    await sendEmail(email, subject, text);
+
+    for (const [k, v] of pending) if (Date.now() > v.expiresAt) pending.delete(k);
+
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(400).json({ error: String(e.message || e) });
+  }
+});
+
+// Шаг 2 — проверка кода и выдача токена
+app.post('/api/register/verify', express.json(), (req, res) => {
+  try {
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    const code  = String(req.body?.code  || '').trim();
+
+    if (!isValidEmail(email))        return res.status(400).json({ error: 'E-mail некорректен' });
+    if (!/^\d{6}$/.test(code))       return res.status(400).json({ error: 'Код должен быть 6 цифр' });
+
+    const rec = pending.get(email);
+    if (!rec)                        return res.status(400).json({ error: 'Код не найден. Запросите новый.' });
+    if (Date.now() > rec.expiresAt) { pending.delete(email); return res.status(400).json({ error: 'Срок кода истёк. Запросите новый.' }); }
+    if (rec.code !== code)           return res.status(400).json({ error: 'Неверный код' });
+
+    const ttlMs = 1000 * 60 * 60 * 24; // 1 день
+    const expiresAt = Date.now() + ttlMs;
     const token = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
 
-    // Сохраняем в память (MVP)
-    accounts.set(email, { expiresAt, token });
-    tokens.set(token, { email, expiresAt });
-
-    // Чистим протухшие
-    for (const [t, v] of tokens) if (Date.now() > v.expiresAt) tokens.delete(t);
-    for (const [e, v] of accounts) if (Date.now() > v.expiresAt) accounts.delete(e);
+    accounts.set(email, { expiresAt, token, name: rec.name, phone: rec.phone });
+    tokens.set(token,   { email, expiresAt });
+    pending.delete(email);
 
     return res.json({ ok: true, email, token, expiresAt });
   } catch (e) {
@@ -399,8 +362,7 @@ app.post('/api/register', express.json(), (req, res) => {
   }
 });
 
-
-// === Служебные маршруты ===
+/* ================== СЛУЖЕБНОЕ И СТАТИКА ================== */
 app.get('/health', (req, res) => {
   res.json({ ok: true, time: new Date().toISOString() });
 });
@@ -410,16 +372,14 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.get('/widget', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'widget.html'));
 });
-
 app.get('/anon', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'anon.html'));
 });
-
 app.get('/register', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'register.html'));
 });
 
-// === Запуск ===
+/* ================== ЗАПУСК ================== */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log('Server running on', PORT);
