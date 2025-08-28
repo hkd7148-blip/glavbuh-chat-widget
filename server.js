@@ -35,7 +35,7 @@ const DEFAULT_CONFIG = {
   RETRY_DELAY_MS: 1000
 };
 
-// Улучшенная обёртка таймаута с детальной информацией
+// Обёртка таймаута
 function withTimeout(promise, ms = DEFAULT_CONFIG.TIMEOUT_MS, tag = 'task') {
   if (typeof ms !== 'number' || ms <= 0) {
     throw new Error('Timeout должен быть положительным числом');
@@ -86,7 +86,7 @@ function withTimeout(promise, ms = DEFAULT_CONFIG.TIMEOUT_MS, tag = 'task') {
   });
 }
 
-// Функция повтора с экспоненциальной задержкой
+// Функция повтора
 async function withRetry(fn, attempts = DEFAULT_CONFIG.RETRY_ATTEMPTS, baseDelayMs = DEFAULT_CONFIG.RETRY_DELAY_MS) {
   let lastError;
   
@@ -100,7 +100,6 @@ async function withRetry(fn, attempts = DEFAULT_CONFIG.RETRY_ATTEMPTS, baseDelay
         throw error;
       }
       
-      // Экспоненциальная задержка с jitter
       const delay = baseDelayMs * Math.pow(2, attempt - 1) + Math.random() * 1000;
       await new Promise(resolve => setTimeout(resolve, delay));
       
@@ -136,7 +135,7 @@ function validateOpenAIParams({ model, messages, temperature, max_tokens }) {
   }
 }
 
-// Улучшенный вызов OpenAI с retry и валидацией
+// Вызов OpenAI
 async function callOpenAIOnce({ 
   model, 
   messages, 
@@ -144,16 +143,13 @@ async function callOpenAIOnce({
   max_tokens = DEFAULT_CONFIG.MAX_TOKENS,
   timeout = DEFAULT_CONFIG.TIMEOUT_MS
 }) {
-  // Проверяем API ключ
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     throw new Error('OPENAI_API_KEY не установлен в переменных окружения');
   }
   
-  // Валидация параметров
   validateOpenAIParams({ model, messages, temperature, max_tokens });
   
-  // Функция для одного запроса
   const makeRequest = async () => {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeout);
@@ -189,7 +185,6 @@ async function callOpenAIOnce({
           } catch {}
         }
         
-        // Специальная обработка разных типов ошибок OpenAI
         if (response.status === 401) {
           throw new Error('Неверный API ключ OpenAI');
         } else if (response.status === 429) {
@@ -203,7 +198,6 @@ async function callOpenAIOnce({
       
       const data = await response.json();
       
-      // Проверяем структуру ответа
       if (!data.choices || !Array.isArray(data.choices) || data.choices.length === 0) {
         throw new Error('Некорректный ответ от OpenAI: отсутствуют choices');
       }
@@ -231,11 +225,10 @@ async function callOpenAIOnce({
     }
   };
   
-  // Выполняем с retry
   return await withRetry(makeRequest);
 }
 
-// ИСПРАВЛЕННАЯ функция стриминга SSE (убран await из обычной функции)
+// ИСПРАВЛЕННАЯ функция стриминга SSE (убран await)
 function sseStreamText(res, text, chunkSize = DEFAULT_CONFIG.CHUNK_SIZE) {
   if (!res || typeof res.write !== 'function') {
     throw new Error('Некорректный объект response');
@@ -250,7 +243,6 @@ function sseStreamText(res, text, chunkSize = DEFAULT_CONFIG.CHUNK_SIZE) {
   }
   
   try {
-    // Устанавливаем заголовки SSE, если еще не установлены
     if (!res.headersSent) {
       res.writeHead(200, {
         'Content-Type': 'text/plain; charset=utf-8',
@@ -264,14 +256,12 @@ function sseStreamText(res, text, chunkSize = DEFAULT_CONFIG.CHUNK_SIZE) {
     let totalSent = 0;
     const totalLength = text.length;
     
-    // Отправляем метаинформацию
     res.write(`data: ${JSON.stringify({ 
       type: 'start',
       totalLength,
       chunkSize 
     })}\n\n`);
     
-    // Отправляем текст порциями (БЕЗ await!)
     for (let i = 0; i < text.length; i += chunkSize) {
       const chunk = text.slice(i, i + chunkSize);
       totalSent += chunk.length;
@@ -285,14 +275,8 @@ function sseStreamText(res, text, chunkSize = DEFAULT_CONFIG.CHUNK_SIZE) {
         chunkIndex: Math.floor(i / chunkSize),
         totalSent
       })}\n\n`);
-      
-      // Убираем await и используем обычный setTimeout для задержки
-      if (i + chunkSize < text.length) {
-        // Синхронная задержка не нужна для SSE
-      }
     }
     
-    // Финальное сообщение
     res.write(`data: ${JSON.stringify({ 
       type: 'end',
       totalSent,
@@ -302,7 +286,6 @@ function sseStreamText(res, text, chunkSize = DEFAULT_CONFIG.CHUNK_SIZE) {
     res.end();
     
   } catch (error) {
-    // Отправляем ошибку через SSE
     try {
       res.write(`data: ${JSON.stringify({ 
         type: 'error',
@@ -310,39 +293,10 @@ function sseStreamText(res, text, chunkSize = DEFAULT_CONFIG.CHUNK_SIZE) {
       })}\n\n`);
       res.end();
     } catch {
-      // Если не можем отправить ошибку через SSE, логируем
       console.error('Ошибка при SSE стриминге:', error);
     }
   }
 }
-
-// Утилита для безопасного JSON.stringify
-function safeStringify(obj, maxLength = 1000) {
-  try {
-    const str = JSON.stringify(obj, null, 2);
-    return str.length > maxLength ? str.slice(0, maxLength) + '...[truncated]' : str;
-  } catch (error) {
-    return `[Ошибка сериализации: ${error.message}]`;
-  }
-}
-
-// Логгер с уровнями
-const logger = {
-  info: (message, ...args) => {
-    console.log(`[INFO] ${new Date().toISOString()} - ${message}`, ...args);
-  },
-  warn: (message, ...args) => {
-    console.warn(`[WARN] ${new Date().toISOString()} - ${message}`, ...args);
-  },
-  error: (message, error, ...args) => {
-    console.error(`[ERROR] ${new Date().toISOString()} - ${message}`, error, ...args);
-  },
-  debug: (message, data) => {
-    if (process.env.NODE_ENV === 'development') {
-      console.debug(`[DEBUG] ${new Date().toISOString()} - ${message}`, safeStringify(data));
-    }
-  }
-};
 
 // Вспомогательные функции
 function clampText(s, max = 8000) {
@@ -385,17 +339,17 @@ async function extractTextFrom(file) {
 function redactPII(text) {
   if (!text) return '';
   let t = text;
-  t = t.replace(/\b\d{2}\s?\d{2}\s?\d{6}\b/g, '[скрыто:паспорт]');         // паспорт РФ
-  t = t.replace(/\b\d{3}-\d{3}-\d{3}\s?\d{2}\b/g, '[скрыто:СНИЛС]');        // СНИЛС
-  t = t.replace(/\b\d{10,12}\b/g, '[скрыто:ИНН/СНИЛС]');                    // ИНН/СНИЛС цифры
-  t = t.replace(/\b\d{13}\b/g, '[скрыто:ОГРН]');                            // ОГРН
-  t = t.replace(/\b\d{15}\b/g, '[скрыто:ОГРНИП]');                          // ОГРНИП
-  t = t.replace(/\b\d{9}\b/g, '[скрыто:БИК]');                               // БИК
-  t = t.replace(/\b(?:\d[ -]?){16,20}\b/g, '[скрыто:счёт/карта]');          // карты/счета
-  t = t.replace(/\+?\d[\d\s()-]{7,}\d/g, '[скрыто:тел]');                    // телефоны
-  t = t.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[скрыто:email]');// email
+  t = t.replace(/\b\d{2}\s?\d{2}\s?\d{6}\b/g, '[скрыто:паспорт]');
+  t = t.replace(/\b\d{3}-\d{3}-\d{3}\s?\d{2}\b/g, '[скрыто:СНИЛС]');
+  t = t.replace(/\b\d{10,12}\b/g, '[скрыто:ИНН/СНИЛС]');
+  t = t.replace(/\b\d{13}\b/g, '[скрыто:ОГРН]');
+  t = t.replace(/\b\d{15}\b/g, '[скрыто:ОГРНИП]');
+  t = t.replace(/\b\d{9}\b/g, '[скрыто:БИК]');
+  t = t.replace(/\b(?:\d[ -]?){16,20}\b/g, '[скрыто:счёт/карта]');
+  t = t.replace(/\+?\d[\d\s()-]{7,}\d/g, '[скрыто:тел]');
+  t = t.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[скрыто:email]');
   t = t.replace(/\b(ул\.|улица|пр-т|проспект|пер\.|переулок|д\.|дом|кв\.|квартира)\s+[^\n,;]+/gi, '[скрыто:адрес]');
-  t = t.replace(/\b[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+){1,2}\b/g, '[скрыто:ФИО]'); // грубо ФИО
+  t = t.replace(/\b[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+){1,2}\b/g, '[скрыто:ФИО]');
   return t;
 }
 
@@ -431,7 +385,7 @@ async function sendEmail(to, subject, text) {
   }
 }
 
-/* ================== АВТОРИЗАЦИЯ (MVP) ================== */
+/* ================== АВТОРИЗАЦИЯ ================== */
 function getTokenInfo(token = '') {
   if (!token) return null;
   const rec = tokens.get(token);
@@ -453,7 +407,8 @@ function authRequired(req, res, next) {
   next();
 }
 
-/* ================== API: ЗАГРУЗКА ДЛЯ ЧАТА ================== */
+/* ================== API ROUTES ================== */
+// Загрузка файлов
 app.post('/api/upload', authRequired, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'Файл не получен' });
@@ -478,7 +433,6 @@ app.post('/api/upload', authRequired, upload.single('file'), async (req, res) =>
   }
 });
 
-/* ================== API: ЧАТ ================== */
 // Обычный чат
 app.post('/api/chat', authRequired, express.json(), async (req, res) => {
   try {
@@ -493,8 +447,7 @@ app.post('/api/chat', authRequired, express.json(), async (req, res) => {
       attachmentNote = `\n\nВложенный текст (обезличенный, до 8k):\n${a.text}`;
     }
 
-    const systemPrompt = `Ты — онлайн-помощник главного бухгалтера для РФ. Отвечай кратко и по делу, по-русски.
-Если вопрос требует персональных данных — попроси обезличить и предложи инструмент /anonimize/.${attachmentNote}`;
+    const systemPrompt = `Ты — онлайн-помощник главного бухгалтера для РФ. Отвечай кратко и по делу, по-русски.${attachmentNote}`;
 
     const body = {
       model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
@@ -561,160 +514,183 @@ app.post('/api/chat', authRequired, express.json(), async (req, res) => {
   }
 });
 
-// Ансамбль чат - ИСПРАВЛЕНА функция sseStreamText
+// Ансамбль чат (упрощенная версия)
 app.post('/api/chat_plus', authRequired, express.json(), async (req, res) => {
-  let headersSent = false;
-  
-  // Утилита для безопасной отправки SSE заголовков
-  const ensureSSEHeaders = () => {
-    if (!headersSent) {
-      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-      res.setHeader('Cache-Control', 'no-cache, no-transform');
-      res.setHeader('Connection', 'keep-alive');
-      res.setHeader('X-Accel-Buffering', 'no');
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      res.flushHeaders?.();
-      headersSent = true;
-    }
-  };
-  
-  // Утилита для отправки SSE ошибки
-  const sendSSEError = (error, code = 'ensemble_error') => {
-    try {
-      ensureSSEHeaders();
-      res.write(`data: ${JSON.stringify({ 
-        type: 'error',
-        error: code, 
-        message: String(error?.message || error),
-        timestamp: new Date().toISOString()
-      })}\n\n`);
-      res.end();
-    } catch (writeError) {
-      console.error('Ошибка отправки SSE error:', writeError);
-      if (!res.headersSent) {
-        res.status(500).json({ error: code, message: String(error?.message || error) });
-      }
-    }
-  };
-
   try {
     const { messages, attachmentId } = req.body || {};
-    
-    // Валидация входных данных
-    if (!Array.isArray(messages) || messages.length === 0) {
-      return sendSSEError(new Error('messages должен быть непустым массивом'), 'invalid_input');
+    if (!Array.isArray(messages)) {
+      return res.status(400).json({ error: 'messages must be an array' });
     }
 
-    // Проверяем структуру сообщений
-    for (const msg of messages) {
-      if (!msg.role || !msg.content || typeof msg.content !== 'string') {
-        return sendSSEError(new Error('Каждое сообщение должно содержать role и content'), 'invalid_message');
-      }
-    }
-
-    // Контекст вложения
     let attachmentNote = '';
     if (attachmentId && attachments.has(attachmentId)) {
-      const attachment = attachments.get(attachmentId);
-      const truncatedText = attachment.text.length > 8000 
-        ? attachment.text.slice(0, 8000) + '...[обрезано]'
-        : attachment.text;
-      attachmentNote = `\n\nВложенный текст (обезличенный, до 8k):\n${truncatedText}`;
+      const a = attachments.get(attachmentId);
+      attachmentNote = `\n\nВложенный текст (обезличенный, до 8k):\n${a.text}`;
     }
 
-    // Конфигурация
-    const config = {
-      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
-      timeout: Number(process.env.ENSEMBLE_TIMEOUT_MS || 15000),
-      aggTokens: Number(process.env.ENSEMBLE_AGG_TOKENS || 1000),
-      fallbackTimeout: Number(process.env.FALLBACK_TIMEOUT_MS || 10000)
-    };
-
-    // Базовый системный промпт
     const baseSystem = `Ты — онлайн-помощник главного бухгалтера для РФ. Отвечай кратко и по делу, по-русски.${attachmentNote}`;
 
-    // Две роли
-    const roleA = {
-      name: 'Нормативно-правовой',
-      system: `${baseSystem}\n\nРОЛЬ: Нормативно-правовой консультант\nФОКУС: Точность, ссылки на НК РФ/ПБУ/ФЗ, формулы расчётов.`,
-      temperature: 0.2
-    };
-
-    const roleB = {
-      name: 'Практико-прикладной',
-      system: `${baseSystem}\n\nРОЛЬ: Практический консультант\nФОКУС: Реальные кейсы, ошибки, рекомендации по процедурам.`,
-      temperature: 0.4
-    };
-
-    // Отправляем начальный статус
-    ensureSSEHeaders();
-    res.write(`data: ${JSON.stringify({ 
-      type: 'status',
-      message: 'Запускаем ансамбль экспертов...',
-      stage: 'init'
-    })}\n\n`);
-
-    // Готовим запросы
-    const createRequest = (role) => callOpenAIOnce({
-      model: config.model,
-      temperature: role.temperature,
+    const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    
+    // Простая версия без ансамбля - используем один запрос
+    const result = await callOpenAIOnce({
+      model,
+      temperature: 0.3,
       max_tokens: 700,
-      timeout: config.timeout,
       messages: [
-        { role: 'system', content: role.system },
+        { role: 'system', content: baseSystem },
         ...messages
       ]
     });
 
-    const requestA = createRequest(roleA);
-    const requestB = createRequest(roleB);
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
 
-    // Выполняем параллельно
-    const [resultA, resultB] = await Promise.all([
-      withTimeout(requestA, config.timeout, 'A'),
-      withTimeout(requestB, config.timeout, 'B')
-    ]);
+    sseStreamText(res, result.content);
 
-    // Собираем результаты
-    const validParts = [];
-    const errors = [];
+  } catch (e) {
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
+    res.write(`data: ${JSON.stringify({ error: 'ensemble_error', detail: String(e?.message || e) })}\n\n`);
+    res.end();
+  }
+});
 
-    if (resultA.ok && resultA.value?.content) {
-      validParts.push({
-        role: roleA.name,
-        content: resultA.value.content,
-        usage: resultA.value.usage
-      });
-    } else {
-      errors.push(`${roleA.name}: ${resultA.error || 'неизвестная ошибка'}`);
+// Обезличивание
+app.post('/api/anon', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'Файл не получен' });
+
+    const raw = await extractTextFrom(req.file);
+    const trimmed = clampText(raw, 20000);
+    const safe = redactPII(trimmed);
+
+    const base = (req.file.originalname || 'document').replace(/\.[^.]+$/, '');
+    const fname = `${base}-anon.txt`;
+
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fname)}"`);
+    return res.send(safe);
+  } catch (e) {
+    return res.status(400).json({ error: String(e.message || e) });
+  }
+});
+
+// Регистрация - отправка кода
+app.post('/api/register/init', express.json(), async (req, res) => {
+  try {
+    const name  = String(req.body?.name  || '').trim();
+    const phone = String(req.body?.phone || '').trim();
+    const email = String(req.body?.email || '').trim().toLowerCase();
+
+    if (!name || name.length < 3)  return res.status(400).json({ error: 'Укажите ФИО' });
+    if (!isValidPhone(phone))      return res.status(400).json({ error: 'Укажите корректный телефон' });
+    if (!isValidEmail(email))      return res.status(400).json({ error: 'Укажите корректный e-mail' });
+
+    const old = pending.get(email);
+    if (old && Date.now() - (old.lastSentAt || 0) < 60000) {
+      return res.status(429).json({ error: 'Код уже отправлен. Попробуйте через минуту.' });
     }
 
-    if (resultB.ok && resultB.value?.content) {
-      validParts.push({
-        role: roleB.name,
-        content: resultB.value.content,
-        usage: resultB.value.usage
-      });
-    } else {
-      errors.push(`${roleB.name}: ${resultB.error || 'неизвестная ошибка'}`);
-    }
+    const code = genCode();
+    const expiresAt = Date.now() + 1000 * 60 * 10;
+    pending.set(email, { name, phone, code, expiresAt, lastSentAt: Date.now() });
 
-    console.log(`Ансамбль: получено ${validParts.length}/2 ответов`, errors.length > 0 ? { errors } : '');
+    const subject = 'Код подтверждения — Ваш ГлавБух';
+    const text = `Здравствуйте, ${name}!\n\nВаш код подтверждения: ${code}\nСрок действия: 10 минут.\n\nЕсли вы не запрашивали код, просто игнорируйте это письмо.`;
 
-    // Fallback если ничего не получили
-    if (validParts.length === 0) {
-      res.write(`data: ${JSON.stringify({ 
-        type: 'status',
-        message: 'Переключаемся на базовый режим...',
-        stage: 'fallback'
-      })}\n\n`);
+    await sendEmail(email, subject, text);
 
-      try {
-        const fallbackResult = await withTimeout(
-          callOpenAIOnce({
-            model: config.model,
-            temperature: 0.3,
-            max_tokens: 800,
-            timeout: config.fallbackTimeout,
-            messages: [
-              { role:
+    for (const [k, v] of pending) if (Date.now() > v.expiresAt) pending.delete(k);
+
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(400).json({ error: String(e.message || e) });
+  }
+});
+
+// Регистрация - проверка кода
+app.post('/api/register/verify', express.json(), (req, res) => {
+  try {
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    const code  = String(req.body?.code  || '').trim();
+
+    if (!isValidEmail(email))        return res.status(400).json({ error: 'E-mail некорректен' });
+    if (!/^\d{6}$/.test(code))       return res.status(400).json({ error: 'Код должен быть 6 цифр' });
+
+    const rec = pending.get(email);
+    if (!rec)                        return res.status(400).json({ error: 'Код не найден. Запросите новый.' });
+    if (Date.now() > rec.expiresAt) { pending.delete(email); return res.status(400).json({ error: 'Срок кода истёк. Запросите новый.' }); }
+    if (rec.code !== code)           return res.status(400).json({ error: 'Неверный код' });
+
+    const ttlMs = 1000 * 60 * 60 * 24;
+    const expiresAt = Date.now() + ttlMs;
+    const token = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+
+    accounts.set(email, { expiresAt, token, name: rec.name, phone: rec.phone });
+    tokens.set(token,   { email, expiresAt });
+    pending.delete(email);
+
+    return res.json({ ok: true, email, token, expiresAt });
+  } catch (e) {
+    return res.status(400).json({ error: String(e.message || e) });
+  }
+});
+
+// Здоровье
+app.get('/health', (req, res) => {
+  res.json({ ok: true, time: new Date().toISOString() });
+});
+
+// Статика
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Виджет
+app.get('/widget', (req, res) => {
+  const token = getCookie(req, 'gb_token');
+  const info = token ? tokens.get(token) : null;
+  const valid = info && Date.now() < info.expiresAt;
+
+  if (!valid) {
+    return res.send(`
+      <!doctype html>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <title>Доступ к чату</title>
+      <style>
+        body{margin:0;background:#f7f8fb;font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Arial;color:#111827}
+        .wrap{max-width:640px;margin:0 auto;padding:24px}
+        .card{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:16px}
+        a.button{display:inline-block;padding:10px 16px;border-radius:10px;background:#10B981;color:#fff;text-decoration:none;font-weight:700}
+        .muted{font-size:13px;color:#6B7280}
+      </style>
+      <div class="wrap">
+        <div class="card">
+          <h1 style="margin:0 0 6px;color:#1E3A8A;font-size:20px">Доступ только для зарегистрированных</h1>
+          <p class="muted">Чтобы открыть чат онлайн-помощника, пройдите регистрацию и подтвердите e-mail. Это займёт минуту.</p>
+          <p><a class="button" href="/register">Зарегистрироваться</a></p>
+        </div>
+      </div>
+    `);
+  }
+
+  res.sendFile(path.join(__dirname, 'public', 'widget.html'));
+});
+
+app.get('/anon', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'anon.html'));
+});
+
+app.get('/register', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'register.html'));
+});
+
+/* ================== ЗАПУСК ================== */
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log('Server running on', PORT);
+});
