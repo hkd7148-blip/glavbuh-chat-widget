@@ -971,6 +971,15 @@ app.post('/api/register/verify', express.json(), (req, res) => {
     accounts.set(email, { expiresAt, token, name: rec.name, phone: rec.phone });
     tokens.set(token,   { email, expiresAt });
     pending.delete(email);
+    
+    // Инициализируем статистику нового пользователя
+userStats.set(email, {
+  registeredAt: Date.now(),
+  lastActive: Date.now(),
+  requestCount: 0,
+  isBlocked: false,
+  blockReason: null
+});
 
     return res.json({ ok: true, email, token, expiresAt });
   } catch (e) {
