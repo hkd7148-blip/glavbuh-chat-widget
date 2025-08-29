@@ -442,7 +442,7 @@ function authRequired(req, res, next) {
 
 /* ================== API ROUTES ================== */
 // Загрузка файлов
-app.post('/api/upload', authRequired, upload.single('file'), async (req, res) => {
+app.post('/api/upload', authRequired, trackUserActivity, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'Файл не получен' });
 
@@ -469,7 +469,7 @@ app.post('/api/upload', authRequired, upload.single('file'), async (req, res) =>
 // Исправленная версия:
 
 // Обычный чат
-app.post('/api/chat', authRequired, express.json(), async (req, res) => {
+app.post('/api/chat', authRequired, trackUserActivity, express.json(), async (req, res) => {
   try {
     const { messages, attachmentId } = req.body || {};
     if (!Array.isArray(messages)) {
@@ -550,7 +550,7 @@ app.post('/api/chat', authRequired, express.json(), async (req, res) => {
 });
 
 // Полный ансамбль чат
-app.post('/api/chat_plus', authRequired, express.json(), async (req, res) => {
+app.post('/api/chat_plus', authRequired, trackUserActivity, express.json(), async (req, res) => {
   let headersSent = false;
   
   // Утилита для безопасной отправки SSE заголовков
