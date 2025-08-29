@@ -433,6 +433,8 @@ app.post('/api/upload', authRequired, upload.single('file'), async (req, res) =>
   }
 });
 
+// Исправленная версия:
+
 // Обычный чат
 app.post('/api/chat', authRequired, express.json(), async (req, res) => {
   try {
@@ -514,7 +516,7 @@ app.post('/api/chat', authRequired, express.json(), async (req, res) => {
   }
 });
 
-// Полный ансамбль чат - заменить упрощенную версию /api/chat_plus
+// Полный ансамбль чат
 app.post('/api/chat_plus', authRequired, express.json(), async (req, res) => {
   let headersSent = false;
   
@@ -774,34 +776,6 @@ app.post('/api/chat_plus', authRequired, express.json(), async (req, res) => {
     return sendSSEError(error, 'critical_error');
   }
 });
-try {
-    // Простая версия без ансамбля - используем один запрос
-    const result = await callOpenAIOnce({
-      model,
-      temperature: 0.3,
-      max_tokens: 700,
-      messages: [
-        { role: 'system', content: baseSystem },
-        ...messages
-      ]
-    });
-
-    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-cache, no-transform');
-    res.setHeader('X-Accel-Buffering', 'no');
-    res.flushHeaders?.();
-
-    sseStreamText(res, result.content);
-try {
-  } catch (e) {
-    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-cache, no-transform');
-    res.setHeader('X-Accel-Buffering', 'no');
-    res.flushHeaders?.();
-    res.write(`data: ${JSON.stringify({ error: 'ensemble_error', detail: String(e?.message || e) })}\n\n`);
-    res.end();
-  }
-});
 
 // Обезличивание
 app.post('/api/anon', upload.single('file'), async (req, res) => {
@@ -822,7 +796,6 @@ app.post('/api/anon', upload.single('file'), async (req, res) => {
     return res.status(400).json({ error: String(e.message || e) });
   }
 });
-
 // Регистрация - отправка кода
 app.post('/api/register/init', express.json(), async (req, res) => {
   try {
