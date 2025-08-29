@@ -398,6 +398,25 @@ function getTokenInfo(token = '') {
   return rec;
 }
 
+// Middleware для отслеживания активности пользователей
+function trackUserActivity(req, res, next) {
+  if (req.user?.email) {
+    const email = req.user.email;
+    const stats = userStats.get(email) || {
+      registeredAt: Date.now(),
+      lastActive: Date.now(),
+      requestCount: 0,
+      isBlocked: false,
+      blockReason: null
+    };
+    
+    stats.lastActive = Date.now();
+    stats.requestCount++;
+    userStats.set(email, stats);
+  }
+  next();
+}
+
 function authRequired(req, res, next) {
   const token = req.headers['x-gb-token'] || '';
   const info = getTokenInfo(String(token));
