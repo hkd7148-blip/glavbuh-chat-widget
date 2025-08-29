@@ -426,6 +426,16 @@ function authRequired(req, res, next) {
       message: 'Доступ к онлайн-помощнику только после регистрации или продления.'
     });
   }
+  
+  // Проверка блокировки пользователя
+  const stats = userStats.get(info.email);
+  if (stats?.isBlocked) {
+    return res.status(403).json({
+      error: 'user_blocked',
+      message: stats.blockReason || 'Ваш аккаунт заблокирован администратором'
+    });
+  }
+  
   req.user = { email: info.email, expiresAt: info.expiresAt };
   next();
 }
