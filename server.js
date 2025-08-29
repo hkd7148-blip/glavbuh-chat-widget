@@ -792,7 +792,7 @@ try {
     res.flushHeaders?.();
 
     sseStreamText(res, result.content);
-
+try {
   } catch (e) {
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
