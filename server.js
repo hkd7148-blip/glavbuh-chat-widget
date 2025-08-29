@@ -829,6 +829,94 @@ app.post('/api/anon', upload.single('file'), async (req, res) => {
     return res.status(400).json({ error: String(e.message || e) });
   }
 });
+/* ================== АДМИНСКИЕ API ================== */
+
+// Проверка админских прав
+function adminRequired(req, res, next) {
+  const token = req.headers['x-gb-token'] || '';
+  const info = getTokenInfo(String(token));
+  
+  if (!info || !adminUsers.has(info.email)) {
+    return res.status(403).json({ error: 'admin_access_required' });
+  }
+  
+  req.admin = { email: info.email };
+  next();
+}
+
+// Статистика пользователей
+app.get('/api/admin/users', adminRequired, (req, res) => {
+  const users = [];
+  for (const [email, account] of accounts) {
+    const stats = userStats.get(email) || {};
+    users.push({
+      email,
+      name: account.name,
+      phone: account.phone,
+      registeredAt: stats.registeredAt || account.expiresAt - (24*60*60*1000),
+      lastActive: stats.lastActive,
+      requestCount: stats.requestCount || 0,
+      isBlocked: stats.isBlocked || false,
+      blockReason: stats.blockReason,
+      tokenExpiresAt: account.expiresAt
+    });
+  }
+  
+  // Сортируем по последней активности
+  users.sort((a, b) => (b.lastActive || 0) - (a.lastActive || 0));
+  
+  res.json({
+    total: users.length,
+    active: users.filter(u => !u.isBlocked).length,
+    blocked: users.filter(u => u.isBlocked).length,
+    users
+  });
+});
+
+// Блокировка/разблокировка пользователя
+app.post('/api/admin/users/:email/block', adminRequired, express.json(), (req, res) => {
+  const { email } = req.params;
+  const { block, reason } = req.body;
+  
+  if (!accounts.has(email)) {
+    return res.status(404).json({ error: 'Пользователь не найден' });
+  }
+  
+  const stats = userStats.get(email) || {};
+  stats.isBlocked = Boolean(block);
+  stats.blockReason = block ? (reason || 'Заблокирован администратором') : null;
+  userStats.set(email, stats);
+  
+  res.json({
+    email,
+    isBlocked: stats.isBlocked,
+    blockReason: stats.blockReason
+  });
+});
+
+// Статистика системы
+app.get('/api/admin/stats', adminRequired, (req, res) => {
+  const now = Date.now();
+  const day = 24 * 60 * 60 * 1000;
+  
+  let activeToday = 0;
+  let totalRequests = 0;
+  
+  for (const stats of userStats.values()) {
+    if (stats.lastActive && (now - stats.lastActive) < day) {
+      activeToday++;
+    }
+    totalRequests += stats.requestCount || 0;
+  }
+  
+  res.json({
+    totalUsers: accounts.size,
+    activeToday,
+    totalRequests,
+    pendingRegistrations: pending.size,
+    attachmentsCount: attachments.size
+  });
+});
 // Регистрация - отправка кода
 app.post('/api/register/init', express.json(), async (req, res) => {
   try {
