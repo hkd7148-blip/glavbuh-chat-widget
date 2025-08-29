@@ -17,6 +17,10 @@ const accounts    = new Map(); // email -> { expiresAt, token, name, phone }
 const tokens      = new Map(); // token -> { email, expiresAt }
 const pending     = new Map(); // email -> { name, phone, code, expiresAt, lastSentAt }
 
+/* ================== СТАТИСТИКА И АДМИНИСТРИРОВАНИЕ ================== */
+const userStats = new Map(); // email -> { registeredAt, lastActive, requestCount, isBlocked, blockReason }
+const adminUsers = new Set(['admin@example.com']); // список админов
+
 /* ================== ЗАГРУЗКА ФАЙЛОВ ================== */
 const upload = multer({
   storage: multer.memoryStorage(),
