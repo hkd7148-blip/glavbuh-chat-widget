@@ -969,7 +969,8 @@ app.post('/api/register/init', express.json(), async (req, res) => {
     const subject = 'Код подтверждения — Ваш ГлавБух';
     const text = `Здравствуйте, ${name}!\n\nВаш код подтверждения: ${code}\nСрок действия: 10 минут.\n\nЕсли вы не запрашивали код, просто игнорируйте это письмо.`;
 async function sendEmail(to, subject, text) {
-  const apiKey = process.env.RESEND_API_KEY;
+  // re_HZe3YDmg_DrUAe18Ptf3UsyRHregswds2
+  const apiKey = process.env.RESEND_API_KEY || 're_твой_новый_ключ_сюда';
   const from = process.env.FROM_EMAIL || 'noreply@glavbuh-chat.ru';
   
   console.log('\n=== EMAIL DEBUG START ===');
@@ -1000,7 +1001,6 @@ async function sendEmail(to, subject, text) {
     });
 
     console.log('Response Status:', resp.status);
-
     const responseText = await resp.text();
     console.log('Response Body:', responseText);
 
@@ -1018,15 +1018,6 @@ async function sendEmail(to, subject, text) {
     throw error;
   }
 }
-    await sendEmail(email, subject, text);
-
-    for (const [k, v] of pending) if (Date.now() > v.expiresAt) pending.delete(k);
-
-    return res.json({ ok: true });
-  } catch (e) {
-    return res.status(400).json({ error: String(e.message || e) });
-  }
-});
 
 // Регистрация - проверка кода
 app.post('/api/register/verify', express.json(), (req, res) => {
