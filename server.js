@@ -970,7 +970,7 @@ app.post('/api/register/init', express.json(), async (req, res) => {
     const text = `Здравствуйте, ${name}!\n\nВаш код подтверждения: ${code}\nСрок действия: 10 минут.\n\nЕсли вы не запрашивали код, просто игнорируйте это письмо.`;
 async function sendEmail(to, subject, text) {
   // КРИТИЧНО: убери этот API ключ из кода! Он виден всем в GitHub!
-  const apiKey = process.env.RESEND_API_KEY || 're_HZe3YDmg_DrUAe18Ptf3UsyRHregswds2';
+  const apiKey = process.env.RESEND_API_KEY;
   const from = process.env.FROM_EMAIL || 'noreply@glavbuh-chat.ru';
   
   console.log('\n=== EMAIL DEBUG START ===');
