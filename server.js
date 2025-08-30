@@ -969,8 +969,8 @@ app.post('/api/register/init', express.json(), async (req, res) => {
     const subject = 'Код подтверждения — Ваш ГлавБух';
     const text = `Здравствуйте, ${name}!\n\nВаш код подтверждения: ${code}\nСрок действия: 10 минут.\n\nЕсли вы не запрашивали код, просто игнорируйте это письмо.`;
 async function sendEmail(to, subject, text) {
-  // re_HZe3YDmg_DrUAe18Ptf3UsyRHregswds2
-  const apiKey = process.env.RESEND_API_KEY || 're_твой_новый_ключ_сюда';
+  // КРИТИЧНО: убери этот API ключ из кода! Он виден всем в GitHub!
+  const apiKey = process.env.RESEND_API_KEY || 're_HZe3YDmg_DrUAe18Ptf3UsyRHregswds2';
   const from = process.env.FROM_EMAIL || 'noreply@glavbuh-chat.ru';
   
   console.log('\n=== EMAIL DEBUG START ===');
@@ -1025,30 +1025,33 @@ app.post('/api/register/verify', express.json(), (req, res) => {
     const email = String(req.body?.email || '').trim().toLowerCase();
     const code  = String(req.body?.code  || '').trim();
 
-    if (!isValidEmail(email))        return res.status(400).json({ error: 'E-mail некорректен' });
-    if (!/^\d{6}$/.test(code))       return res.status(400).json({ error: 'Код должен быть 6 цифр' });
+    if (!isValidEmail(email)) return res.status(400).json({ error: 'E-mail некорректен' });
+    if (!/^\d{6}$/.test(code)) return res.status(400).json({ error: 'Код должен быть 6 цифр' });
 
     const rec = pending.get(email);
-    if (!rec)                        return res.status(400).json({ error: 'Код не найден. Запросите новый.' });
-    if (Date.now() > rec.expiresAt) { pending.delete(email); return res.status(400).json({ error: 'Срок кода истёк. Запросите новый.' }); }
-    if (rec.code !== code)           return res.status(400).json({ error: 'Неверный код' });
+    if (!rec) return res.status(400).json({ error: 'Код не найден. Запросите новый.' });
+    if (Date.now() > rec.expiresAt) {
+      pending.delete(email);
+      return res.status(400).json({ error: 'Срок кода истёк. Запросите новый.' });
+    }
+    if (rec.code !== code) return res.status(400).json({ error: 'Неверный код' });
 
     const ttlMs = 1000 * 60 * 60 * 24;
     const expiresAt = Date.now() + ttlMs;
     const token = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
 
     accounts.set(email, { expiresAt, token, name: rec.name, phone: rec.phone });
-    tokens.set(token,   { email, expiresAt });
+    tokens.set(token, { email, expiresAt });
     pending.delete(email);
     
     // Инициализируем статистику нового пользователя
-userStats.set(email, {
-  registeredAt: Date.now(),
-  lastActive: Date.now(),
-  requestCount: 0,
-  isBlocked: false,
-  blockReason: null
-});
+    userStats.set(email, {
+      registeredAt: Date.now(),
+      lastActive: Date.now(),
+      requestCount: 0,
+      isBlocked: false,
+      blockReason: null
+    });
 
     return res.json({ ok: true, email, token, expiresAt });
   } catch (e) {
