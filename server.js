@@ -373,19 +373,48 @@ function isValidPhone(p = '') {
 async function sendEmail(to, subject, text) {
   const apiKey = process.env.RESEND_API_KEY;
   const from = process.env.FROM_EMAIL || 'onboarding@resend.dev';
+  
+  console.log('\n=== EMAIL DEBUG START ===');
+  console.log('API Key:', apiKey ? `${apiKey.substring(0, 10)}...` : 'НЕТ');
+  console.log('From:', from);
+  console.log('To:', to);
+  console.log('Subject:', subject);
+  console.log('========================\n');
+  
   if (!apiKey) throw new Error('RESEND_API_KEY не задан');
 
-  const resp = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ from, to, subject, text })
-  });
-  if (!resp.ok) {
-    const t = await resp.text().catch(() => '');
-    throw new Error('Resend error: ' + t);
+  try {
+    const payload = { from, to, subject, text };
+    console.log('Payload:', JSON.stringify(payload, null, 2));
+
+    const resp = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+
+    console.log('Response Status:', resp.status);
+    console.log('Response Headers:', Object.fromEntries(resp.headers.entries()));
+
+    const responseText = await resp.text();
+    console.log('Response Body:', responseText);
+
+    if (!resp.ok) {
+      throw new Error('Resend API error: ' + responseText);
+    }
+
+    const result = JSON.parse(responseText);
+    console.log('Email sent successfully:', result);
+    console.log('=== EMAIL DEBUG END ===\n');
+    
+    return result;
+
+  } catch (error) {
+    console.error('Email sending failed:', error);
+    throw error;
   }
 }
 
