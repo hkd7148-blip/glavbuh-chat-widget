@@ -939,7 +939,16 @@ app.post('/api/register/init', express.json(), async (req, res) => {
 
     const subject = 'Код подтверждения — Ваш ГлавБух';
     const text = `Здравствуйте, ${name}!\n\nВаш код подтверждения: ${code}\nСрок действия: 10 минут.\n\nЕсли вы не запрашивали код, просто игнорируйте это письмо.`;
-
+async function sendEmail(to, subject, text) {
+  console.log('RESEND_API_KEY:', process.env.RESEND_API_KEY ? 'Установлен' : 'НЕ УСТАНОВЛЕН');
+  console.log('FROM_EMAIL:', process.env.FROM_EMAIL);
+  
+  const apiKey = process.env.RESEND_API_KEY;
+  const from = process.env.FROM_EMAIL || 'onboarding@resend.dev';
+  if (!apiKey) throw new Error('RESEND_API_KEY не задан');
+  
+  // остальной код...
+}
     await sendEmail(email, subject, text);
 
     for (const [k, v] of pending) if (Date.now() > v.expiresAt) pending.delete(k);
