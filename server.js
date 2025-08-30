@@ -19,7 +19,7 @@ const pending     = new Map(); // email -> { name, phone, code, expiresAt, lastS
 
 /* ================== СТАТИСТИКА И АДМИНИСТРИРОВАНИЕ ================== */
 const userStats = new Map(); // email -> { registeredAt, lastActive, requestCount, isBlocked, blockReason }
-const adminUsers = new Set(['admin@example.com']); // список админов
+const adminUsers = new Set(['glavbuh.chat@gmail.com']); // список админов
 
 /* ================== ЗАГРУЗКА ФАЙЛОВ ================== */
 const upload = multer({
