@@ -17,6 +17,71 @@ const accounts    = new Map(); // email -> { expiresAt, token, name, phone }
 const tokens      = new Map(); // token -> { email, expiresAt }
 const pending     = new Map(); // email -> { name, phone, code, expiresAt, lastSentAt }
 
+/* ================== ПОСТОЯННОЕ ХРАНЕНИЕ ================== */
+import fs from 'fs';
+
+const DATA_FILE = path.join(__dirname, 'data.json');
+
+// Загрузка данных при старте
+function loadData() {
+  try {
+    if (fs.existsSync(DATA_FILE)) {
+      const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+      
+      // Восстанавливаем только не истекшие данные
+      const now = Date.now();
+      
+      if (data.accounts) {
+        for (const [email, account] of Object.entries(data.accounts)) {
+          if (account.expiresAt > now) {
+            accounts.set(email, account);
+          }
+        }
+      }
+      
+      if (data.tokens) {
+        for (const [token, tokenInfo] of Object.entries(data.tokens)) {
+          if (tokenInfo.expiresAt > now) {
+            tokens.set(token, tokenInfo);
+          }
+        }
+      }
+      
+      if (data.userStats) {
+        for (const [email, stats] of Object.entries(data.userStats)) {
+          userStats.set(email, stats);
+        }
+      }
+      
+      console.log(`Данные загружены: ${accounts.size} аккаунтов, ${tokens.size} токенов`);
+    }
+  } catch (error) {
+    console.error('Ошибка загрузки данных:', error);
+  }
+}
+
+// Сохранение данных
+function saveData() {
+  try {
+    const data = {
+      accounts: Object.fromEntries(accounts),
+      tokens: Object.fromEntries(tokens),
+      userStats: Object.fromEntries(userStats),
+      savedAt: Date.now()
+    };
+    
+    fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+  } catch (error) {
+    console.error('Ошибка сохранения данных:', error);
+  }
+}
+
+// Автосохранение каждые 30 секунд
+setInterval(saveData, 30000);
+
+// Загружаем данные при старте
+loadData();
+
 /* ================== СТАТИСТИКА И АДМИНИСТРИРОВАНИЕ ================== */
 const userStats = new Map(); // email -> { registeredAt, lastActive, requestCount, isBlocked, blockReason }
 const adminUsers = new Set(['admin@glavbuh-chat.ru']); // список админов
@@ -864,9 +929,9 @@ app.post('/api/register/verify', express.json(), (req, res) => {
     }
     if (rec.code !== code) return res.status(400).json({ error: 'Неверный код' });
 
-    const ttlMs = 1000 * 60 * 60 * 24;
+    const ttlMs = 1000 * 60 * 60 * 24 * 7; // 7 дней вместо 1 дня
     const expiresAt = Date.now() + ttlMs;
-    const token = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+    const token = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
 
     accounts.set(email, { expiresAt, token, name: rec.name, phone: rec.phone });
     tokens.set(token, { email, expiresAt });
@@ -881,13 +946,71 @@ app.post('/api/register/verify', express.json(), (req, res) => {
       blockReason: null
     });
 
+    // Сохраняем данные сразу
+    saveData();
+    
+    console.log(`Новый пользователь зарегистрирован: ${email}, токен: ${token.slice(0, 8)}...`);
+
     return res.json({ ok: true, email, token, expiresAt });
   } catch (e) {
     return res.status(400).json({ error: String(e.message || e) });
   }
 });
 
-// Добавим endpoint для отладки токена
+// Добавим endpoint для быстрой повторной регистрации (для отладки)
+app.post('/api/quick-register', express.json(), async (req, res) => {
+  try {
+    const email = 'test@glavbuh-chat.ru';
+    const name = 'Тестовый Пользователь';
+    const phone = '+71234567890';
+    
+    // Проверяем, не зарегистрирован ли уже
+    if (accounts.has(email)) {
+      const account = accounts.get(email);
+      if (Date.now() < account.expiresAt) {
+        return res.json({ 
+          ok: true, 
+          email, 
+          token: account.token, 
+          expiresAt: account.expiresAt,
+          message: 'Пользователь уже существует'
+        });
+      }
+    }
+
+    const ttlMs = 1000 * 60 * 60 * 24 * 7; // 7 дней
+    const expiresAt = Date.now() + ttlMs;
+    const token = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+
+    accounts.set(email, { expiresAt, token, name, phone });
+    tokens.set(token, { email, expiresAt });
+    
+    // Инициализируем статистику
+    userStats.set(email, {
+      registeredAt: Date.now(),
+      lastActive: Date.now(),
+      requestCount: 0,
+      isBlocked: false,
+      blockReason: null
+    });
+
+    // Сохраняем данные сразу
+    saveData();
+    
+    console.log(`Быстрая регистрация: ${email}, токен: ${token.slice(0, 8)}...`);
+
+    return res.json({ 
+      ok: true, 
+      email, 
+      token, 
+      expiresAt,
+      message: 'Тестовый пользователь создан',
+      instructions: `Установите cookie: gb_token=${token}`
+    });
+  } catch (e) {
+    return res.status(400).json({ error: String(e.message || e) });
+  }
+});
 app.get('/api/debug/token', express.json(), (req, res) => {
   const token = req.headers['x-gb-token'] || 
                 req.headers['authorization']?.replace('Bearer ', '') || 
@@ -1083,18 +1206,21 @@ app.use((req, res) => {
 
 /* ================== GRACEFUL SHUTDOWN ================== */
 process.on('SIGINT', () => {
-  console.log('Получен SIGINT, выполняется graceful shutdown...');
+  console.log('Получен SIGINT, сохраняем данные...');
+  saveData();
   process.exit(0);
 });
 
 process.on('SIGTERM', () => {
-  console.log('Получен SIGTERM, выполняется graceful shutdown...');
+  console.log('Получен SIGTERM, сохраняем данные...');
+  saveData();
   process.exit(0);
 });
 
 // Обработка необработанных исключений
 process.on('uncaughtException', (err) => {
   console.error('Uncaught Exception:', err);
+  saveData(); // Сохраняем данные перед выходом
   process.exit(1);
 });
 
