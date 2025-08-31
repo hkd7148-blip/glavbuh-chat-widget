@@ -19,7 +19,7 @@ const pending     = new Map(); // email -> { name, phone, code, expiresAt, lastS
 
 /* ================== СТАТИСТИКА И АДМИНИСТРИРОВАНИЕ ================== */
 const userStats = new Map(); // email -> { registeredAt, lastActive, requestCount, isBlocked, blockReason }
-const adminUsers = new Set(['glavbuh.chat@gmail.com']); // список админов
+const adminUsers = new Set(['admin@glavbuh-chat.ru']); // список админов
 
 /* ================== ЗАГРУЗКА ФАЙЛОВ ================== */
 const upload = multer({
@@ -232,7 +232,7 @@ async function callOpenAIOnce({
   return await withRetry(makeRequest);
 }
 
-// ИСПРАВЛЕННАЯ функция стриминга SSE (убран await)
+// Функция стриминга SSE
 function sseStreamText(res, text, chunkSize = DEFAULT_CONFIG.CHUNK_SIZE) {
   if (!res || typeof res.write !== 'function') {
     throw new Error('Некорректный объект response');
@@ -372,19 +372,24 @@ function isValidPhone(p = '') {
 
 async function sendEmail(to, subject, text) {
   const apiKey = process.env.RESEND_API_KEY;
-  const from = process.env.FROM_EMAIL || 'onboarding@resend.dev';
+  const from = process.env.FROM_EMAIL || 'noreply@glavbuh-chat.ru';
   
   console.log('\n=== EMAIL DEBUG START ===');
   console.log('API Key:', apiKey ? `${apiKey.substring(0, 10)}...` : 'НЕТ');
   console.log('From:', from);
   console.log('To:', to);
-  console.log('Subject:', subject);
   console.log('========================\n');
   
   if (!apiKey) throw new Error('RESEND_API_KEY не задан');
 
   try {
-    const payload = { from, to, subject, text };
+    const payload = { 
+      from, 
+      to: [to],
+      subject, 
+      text 
+    };
+    
     console.log('Payload:', JSON.stringify(payload, null, 2));
 
     const resp = await fetch('https://api.resend.com/emails', {
@@ -397,8 +402,6 @@ async function sendEmail(to, subject, text) {
     });
 
     console.log('Response Status:', resp.status);
-    console.log('Response Headers:', Object.fromEntries(resp.headers.entries()));
-
     const responseText = await resp.text();
     console.log('Response Body:', responseText);
 
@@ -407,8 +410,7 @@ async function sendEmail(to, subject, text) {
     }
 
     const result = JSON.parse(responseText);
-    console.log('Email sent successfully:', result);
-    console.log('=== EMAIL DEBUG END ===\n');
+    console.log('Email sent successfully:', result.id);
     
     return result;
 
@@ -469,395 +471,6 @@ function authRequired(req, res, next) {
   next();
 }
 
-/* ================== API ROUTES ================== */
-// Загрузка файлов
-app.post('/api/upload', authRequired, trackUserActivity, upload.single('file'), async (req, res) => {
-  try {
-    if (!req.file) return res.status(400).json({ error: 'Файл не получен' });
-
-    const raw = await extractTextFrom(req.file);
-    const text = clampText(raw, 8000);
-
-    const safe = text
-      .replace(/\b\d{10,12}\b/g, '[скрыто]')
-      .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[скрыто]')
-      .replace(/\+?\d[\d \-()]{7,}\d/g, '[скрыто]');
-
-    const id = Math.random().toString(36).slice(2);
-    const ttlMs = 1000 * 60 * 15;
-    attachments.set(id, { text: safe, name: req.file.originalname, expiresAt: Date.now() + ttlMs });
-
-    for (const [key, v] of attachments) if (Date.now() > v.expiresAt) attachments.delete(key);
-
-    return res.json({ id, name: req.file.originalname, length: safe.length });
-  } catch (e) {
-    return res.status(400).json({ error: String(e.message || e) });
-  }
-});
-
-// Исправленная версия:
-
-// Обычный чат
-app.post('/api/chat', authRequired, trackUserActivity, express.json(), async (req, res) => {
-  try {
-    const { messages, attachmentId } = req.body || {};
-    if (!Array.isArray(messages)) {
-      return res.status(400).json({ error: 'messages must be an array' });
-    }
-
-    let attachmentNote = '';
-    if (attachmentId && attachments.has(attachmentId)) {
-      const a = attachments.get(attachmentId);
-      attachmentNote = `\n\nВложенный текст (обезличенный, до 8k):\n${a.text}`;
-    }
-
-    const systemPrompt = `Ты — онлайн-помощник главного бухгалтера для РФ. Отвечай кратко и по делу, по-русски.${attachmentNote}`;
-
-    const body = {
-      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
-      stream: true,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        ...messages
-      ],
-      temperature: 0.3,
-      max_tokens: 700
-    };
-
-    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-cache, no-transform');
-    res.setHeader('X-Accel-Buffering', 'no');
-    res.flushHeaders?.();
-
-    const upstream = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(body)
-    });
-
-    if (!upstream.ok || !upstream.body) {
-      const errText = await upstream.text();
-      res.write(`data: ${JSON.stringify({ error: 'upstream_error', detail: errText })}\n\n`);
-      return res.end();
-    }
-
-    const reader = upstream.body.getReader();
-    const decoder = new TextDecoder('utf-8');
-    let buf = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-
-      const chunks = buf.split('\n\n');
-      buf = chunks.pop() || '';
-      for (const chunk of chunks) {
-        const line = chunk.trim();
-        if (!line.startsWith('data:')) continue;
-        const payload = line.slice(5).trim();
-        if (payload === '[DONE]') {
-          res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
-          return res.end();
-        }
-        try {
-          const json = JSON.parse(payload);
-          const delta = json.choices?.[0]?.delta?.content;
-          if (delta) res.write(`data: ${JSON.stringify({ delta })}\n\n`);
-        } catch {}
-      }
-    }
-
-    res.end();
-  } catch (e) {
-    res.write(`data: ${JSON.stringify({ error: 'proxy_error', detail: String(e) })}\n\n`);
-    res.end();
-  }
-});
-
-// Полный ансамбль чат
-app.post('/api/chat_plus', authRequired, trackUserActivity, express.json(), async (req, res) => {
-  let headersSent = false;
-  
-  // Утилита для безопасной отправки SSE заголовков
-  const ensureSSEHeaders = () => {
-    if (!headersSent) {
-      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-      res.setHeader('Cache-Control', 'no-cache, no-transform');
-      res.setHeader('Connection', 'keep-alive');
-      res.setHeader('X-Accel-Buffering', 'no');
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      res.flushHeaders?.();
-      headersSent = true;
-    }
-  };
-  
-  // Утилита для отправки SSE ошибки
-  const sendSSEError = (error, code = 'ensemble_error') => {
-    try {
-      ensureSSEHeaders();
-      res.write(`data: ${JSON.stringify({ 
-        type: 'error',
-        error: code, 
-        message: String(error?.message || error),
-        timestamp: new Date().toISOString()
-      })}\n\n`);
-      res.end();
-    } catch (writeError) {
-      console.error('Ошибка отправки SSE error:', writeError);
-      if (!res.headersSent) {
-        res.status(500).json({ error: code, message: String(error?.message || error) });
-      }
-    }
-  };
-
-  try {
-    const { messages, attachmentId } = req.body || {};
-    
-    // Валидация входных данных
-    if (!Array.isArray(messages) || messages.length === 0) {
-      return sendSSEError(new Error('messages должен быть непустым массивом'), 'invalid_input');
-    }
-
-    // Проверяем структуру сообщений
-    for (const msg of messages) {
-      if (!msg.role || !msg.content || typeof msg.content !== 'string') {
-        return sendSSEError(new Error('Каждое сообщение должно содержать role и content'), 'invalid_message');
-      }
-    }
-
-    // Контекст вложения
-    let attachmentNote = '';
-    if (attachmentId && attachments.has(attachmentId)) {
-      const attachment = attachments.get(attachmentId);
-      const truncatedText = attachment.text.length > 8000 
-        ? attachment.text.slice(0, 8000) + '...[обрезано]'
-        : attachment.text;
-      attachmentNote = `\n\nВложенный текст (обезличенный, до 8k):\n${truncatedText}`;
-    }
-
-    // Конфигурация из переменных окружения
-    const config = {
-      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
-      timeout: Number(process.env.ENSEMBLE_TIMEOUT_MS || 15000),
-      aggTokens: Number(process.env.ENSEMBLE_AGG_TOKENS || 1000),
-      fallbackTimeout: Number(process.env.FALLBACK_TIMEOUT_MS || 10000)
-    };
-
-    // Базовый системный промпт
-    const baseSystem = `Ты — профессиональный онлайн-помощник главного бухгалтера для РФ.
-Отвечай по-русски, структурированно и по делу. Если что-то неоднозначно — укажи варианты и возможные риски.
-При необходимости используй вложенный текст как контекст.${attachmentNote}`;
-
-    // Две специализированные роли для ансамбля
-    const roleA = {
-      name: 'Нормативно-правовой',
-      system: `${baseSystem}
-
-РОЛЬ: Нормативно-правовой консультант
-ФОКУС: Точность формулировок, ссылки на НК РФ/ПБУ/ФЗ/письма ФНС (где уместно), корректность терминологии, формулы расчётов.
-СТИЛЬ: Структурированный, с опорой на нормативную базу.`,
-      temperature: 0.2
-    };
-
-    const roleB = {
-      name: 'Практико-прикладной',
-      system: `${baseSystem}
-
-РОЛЬ: Практический консультант
-ФОКУС: Реальные кейсы, типичные ошибки, "подводные камни", рекомендации по документообороту, учётная политика, процедуры.
-СТИЛЬ: Практический, с примерами и чек-листами.`,
-      temperature: 0.4
-    };
-
-    // Отправляем начальный статус
-    ensureSSEHeaders();
-    res.write(`data: ${JSON.stringify({ 
-      type: 'status',
-      message: 'Запускаем ансамбль экспертов...',
-      stage: 'init'
-    })}\n\n`);
-
-    // Готовим два параллельных запроса
-    const createRequest = (role) => callOpenAIOnce({
-      model: config.model,
-      temperature: role.temperature,
-      max_tokens: 700,
-      timeout: config.timeout,
-      messages: [
-        { role: 'system', content: role.system },
-        ...messages
-      ]
-    });
-
-    const requestA = createRequest(roleA);
-    const requestB = createRequest(roleB);
-
-    // Выполняем запросы параллельно с таймаутом
-    const [resultA, resultB] = await Promise.all([
-      withTimeout(requestA, config.timeout, 'A'),
-      withTimeout(requestB, config.timeout, 'B')
-    ]);
-
-    // Собираем успешные ответы
-    const validParts = [];
-    const errors = [];
-
-    if (resultA.ok && resultA.value?.content) {
-      validParts.push({
-        role: roleA.name,
-        content: resultA.value.content,
-        usage: resultA.value.usage
-      });
-    } else {
-      errors.push(`${roleA.name}: ${resultA.error || 'неизвестная ошибка'}`);
-    }
-
-    if (resultB.ok && resultB.value?.content) {
-      validParts.push({
-        role: roleB.name,
-        content: resultB.value.content,
-        usage: resultB.value.usage
-      });
-    } else {
-      errors.push(`${roleB.name}: ${resultB.error || 'неизвестная ошибка'}`);
-    }
-
-    // Логируем результаты
-    console.log(`Ансамбль: получено ${validParts.length}/2 ответов`, errors.length > 0 ? { errors } : '');
-
-    // Если ничего не получили — fallback на обычный режим
-    if (validParts.length === 0) {
-      res.write(`data: ${JSON.stringify({ 
-        type: 'status',
-        message: 'Переключаемся на базовый режим...',
-        stage: 'fallback'
-      })}\n\n`);
-
-      try {
-        const fallbackResult = await withTimeout(
-          callOpenAIOnce({
-            model: config.model,
-            temperature: 0.3,
-            max_tokens: 800,
-            timeout: config.fallbackTimeout,
-            messages: [
-              { role: 'system', content: baseSystem },
-              ...messages
-            ]
-          }),
-          config.fallbackTimeout,
-          'fallback'
-        );
-
-        if (fallbackResult.ok && fallbackResult.value?.content) {
-          return sseStreamText(res, fallbackResult.value.content);
-        } else {
-          throw new Error(fallbackResult.error || 'Fallback failed');
-        }
-      } catch (fallbackError) {
-        return sendSSEError(new Error(`Все попытки неудачны: ${fallbackError.message}`), 'total_failure');
-      }
-    }
-
-    // Агрегация результатов
-    res.write(`data: ${JSON.stringify({ 
-      type: 'status',
-      message: 'Согласовываем экспертные мнения...',
-      stage: 'aggregation',
-      experts: validParts.length
-    })}\n\n`);
-
-    const userQuestion = messages[messages.length - 1]?.content || 'Вопрос не определён';
-    
-    const aggregatorPrompt = `Ты — старший консультант-координатор.
-    
-ЗАДАЧА: Проанализировать экспертные мнения и дать единый качественный ответ.
-
-СТРУКТУРА ОТВЕТА:
-1. **Итоговый ответ** — синтез экспертных мнений, устранение противоречий
-2. **Что проверено** — ключевые аспекты (2-3 пункта)
-3. **Рекомендации** — конкретные шаги или документы
-4. При неоднозначности — **один уточняющий вопрос**
-
-ПРИНЦИПЫ:
-- Берём лучшее из каждого мнения
-- Устраняем дублирование
-- Сохраняем важные детали и ссылки
-- Структурированная подача`;
-
-    const expertOpinions = validParts.map((part, i) => 
-      `**Эксперт ${i + 1} (${part.role}):**\n${part.content}`
-    ).join('\n\n---\n\n');
-
-    try {
-      const aggregationResult = await withTimeout(
-        callOpenAIOnce({
-          model: config.model,
-          temperature: 0.2,
-          max_tokens: config.aggTokens,
-          timeout: config.timeout,
-          messages: [
-            { role: 'system', content: aggregatorPrompt },
-            { role: 'user', content: `ВОПРОС ПОЛЬЗОВАТЕЛЯ:\n${userQuestion}\n\n---\n\nЭКСПЕРТНЫЕ МНЕНИЯ:\n\n${expertOpinions}` }
-          ]
-        }),
-        config.timeout,
-        'aggregator'
-      );
-
-      if (aggregationResult.ok && aggregationResult.value?.content) {
-        // Добавляем метаинформацию в начало
-        const metadata = `*Ответ подготовлен ансамблем из ${validParts.length} экспертов*\n\n---\n\n`;
-        const finalContent = metadata + aggregationResult.value.content;
-        
-        return sseStreamText(res, finalContent);
-      } else {
-        // Если агрегация не удалась, отдаём лучший из имеющихся ответов
-        const bestAnswer = validParts.reduce((best, current) => 
-          (current.content.length > best.content.length) ? current : best
-        );
-        
-        const fallbackContent = `*Экспертное мнение: ${bestAnswer.role}*\n\n${bestAnswer.content}`;
-        return sseStreamText(res, fallbackContent);
-      }
-    } catch (aggError) {
-      // Если агрегация упала, отдаём объединённые ответы экспертов
-      const combinedContent = validParts.map((part, i) => 
-        `### ${part.role}\n\n${part.content}`
-      ).join('\n\n---\n\n');
-      
-      return sseStreamText(res, combinedContent);
-    }
-
-  } catch (error) {
-    console.error('Критическая ошибка в /api/chat_plus:', error);
-    return sendSSEError(error, 'critical_error');
-  }
-});
-
-// Обезличивание
-app.post('/api/anon', upload.single('file'), async (req, res) => {
-  try {
-    if (!req.file) return res.status(400).json({ error: 'Файл не получен' });
-
-    const raw = await extractTextFrom(req.file);
-    const trimmed = clampText(raw, 20000);
-    const safe = redactPII(trimmed);
-
-    const base = (req.file.originalname || 'document').replace(/\.[^.]+$/, '');
-    const fname = `${base}-anon.txt`;
-
-    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fname)}"`);
-    return res.send(safe);
-  } catch (e) {
-    return res.status(400).json({ error: String(e.message || e) });
-  }
-});
 /* ================== АДМИНСКИЕ API ================== */
 
 // Проверка админских прав
@@ -946,6 +559,180 @@ app.get('/api/admin/stats', adminRequired, (req, res) => {
     attachmentsCount: attachments.size
   });
 });
+
+/* ================== API ROUTES ================== */
+
+// Загрузка файлов
+app.post('/api/upload', authRequired, trackUserActivity, upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'Файл не получен' });
+
+    const raw = await extractTextFrom(req.file);
+    const text = clampText(raw, 8000);
+
+    const safe = text
+      .replace(/\b\d{10,12}\b/g, '[скрыто]')
+      .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[скрыто]')
+      .replace(/\+?\d[\d \-()]{7,}\d/g, '[скрыто]');
+
+    const id = Math.random().toString(36).slice(2);
+    const ttlMs = 1000 * 60 * 15;
+    attachments.set(id, { text: safe, name: req.file.originalname, expiresAt: Date.now() + ttlMs });
+
+    for (const [key, v] of attachments) if (Date.now() > v.expiresAt) attachments.delete(key);
+
+    return res.json({ id, name: req.file.originalname, length: safe.length });
+  } catch (e) {
+    return res.status(400).json({ error: String(e.message || e) });
+  }
+});
+
+// Обычный чат
+app.post('/api/chat', authRequired, trackUserActivity, express.json(), async (req, res) => {
+  try {
+    const { messages, attachmentId } = req.body || {};
+    if (!Array.isArray(messages)) {
+      return res.status(400).json({ error: 'messages must be an array' });
+    }
+
+    let attachmentNote = '';
+    if (attachmentId && attachments.has(attachmentId)) {
+      const a = attachments.get(attachmentId);
+      attachmentNote = `\n\nВложенный текст (обезличенный, до 8k):\n${a.text}`;
+    }
+
+    const systemPrompt = `Ты — онлайн-помощник главного бухгалтера для РФ. Отвечай кратко и по делу, по-русски.${attachmentNote}`;
+
+    const body = {
+      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+      stream: true,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        ...messages
+      ],
+      temperature: 0.3,
+      max_tokens: 700
+    };
+
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
+
+    const upstream = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body)
+    });
+
+    if (!upstream.ok || !upstream.body) {
+      const errText = await upstream.text();
+      res.write(`data: ${JSON.stringify({ error: 'upstream_error', detail: errText })}\n\n`);
+      return res.end();
+    }
+
+    const reader = upstream.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buf = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+
+      const chunks = buf.split('\n\n');
+      buf = chunks.pop() || '';
+      for (const chunk of chunks) {
+        const line = chunk.trim();
+        if (!line.startsWith('data:')) continue;
+        const payload = line.slice(5).trim();
+        if (payload === '[DONE]') {
+          res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+          return res.end();
+        }
+        try {
+          const json = JSON.parse(payload);
+          const delta = json.choices?.[0]?.delta?.content;
+          if (delta) res.write(`data: ${JSON.stringify({ delta })}\n\n`);
+        } catch {}
+      }
+    }
+
+    res.end();
+  } catch (e) {
+    res.write(`data: ${JSON.stringify({ error: 'proxy_error', detail: String(e) })}\n\n`);
+    res.end();
+  }
+});
+
+// Ансамбль чат
+app.post('/api/chat_plus', authRequired, trackUserActivity, express.json(), async (req, res) => {
+  try {
+    const { messages, attachmentId } = req.body || {};
+    if (!Array.isArray(messages)) {
+      return res.status(400).json({ error: 'messages must be an array' });
+    }
+
+    let attachmentNote = '';
+    if (attachmentId && attachments.has(attachmentId)) {
+      const a = attachments.get(attachmentId);
+      attachmentNote = `\n\nВложенный текст (обезличенный, до 8k):\n${a.text}`;
+    }
+
+    const baseSystem = `Ты — онлайн-помощник главного бухгалтера для РФ. Отвечай кратко и по делу, по-русски.${attachmentNote}`;
+    const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    
+    // Простая версия без ансамбля
+    const result = await callOpenAIOnce({
+      model,
+      temperature: 0.3,
+      max_tokens: 700,
+      messages: [
+        { role: 'system', content: baseSystem },
+        ...messages
+      ]
+    });
+
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
+
+    sseStreamText(res, result.content);
+
+  } catch (e) {
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
+    res.write(`data: ${JSON.stringify({ error: 'ensemble_error', detail: String(e?.message || e) })}\n\n`);
+    res.end();
+  }
+});
+
+// Обезличивание
+app.post('/api/anon', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'Файл не получен' });
+
+    const raw = await extractTextFrom(req.file);
+    const trimmed = clampText(raw, 20000);
+    const safe = redactPII(trimmed);
+
+    const base = (req.file.originalname || 'document').replace(/\.[^.]+$/, '');
+    const fname = `${base}-anon.txt`;
+
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fname)}"`);
+    return res.send(safe);
+  } catch (e) {
+    return res.status(400).json({ error: String(e.message || e) });
+  }
+});
+
 // Регистрация - отправка кода
 app.post('/api/register/init', express.json(), async (req, res) => {
   try {
@@ -968,56 +755,16 @@ app.post('/api/register/init', express.json(), async (req, res) => {
 
     const subject = 'Код подтверждения — Ваш ГлавБух';
     const text = `Здравствуйте, ${name}!\n\nВаш код подтверждения: ${code}\nСрок действия: 10 минут.\n\nЕсли вы не запрашивали код, просто игнорируйте это письмо.`;
-async function sendEmail(to, subject, text) {
-  // КРИТИЧНО: убери этот API ключ из кода! Он виден всем в GitHub!
-  const apiKey = process.env.RESEND_API_KEY;
-  const from = process.env.FROM_EMAIL || 'noreply@glavbuh-chat.ru';
-  
-  console.log('\n=== EMAIL DEBUG START ===');
-  console.log('API Key:', apiKey ? `${apiKey.substring(0, 10)}...` : 'НЕТ');
-  console.log('From:', from);
-  console.log('To:', to);
-  console.log('========================\n');
-  
-  if (!apiKey) throw new Error('RESEND_API_KEY не задан');
 
-  try {
-    const payload = { 
-      from, 
-      to: [to],
-      subject, 
-      text 
-    };
-    
-    console.log('Payload:', JSON.stringify(payload, null, 2));
+    await sendEmail(email, subject, text);
 
-    const resp = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(payload)
-    });
+    for (const [k, v] of pending) if (Date.now() > v.expiresAt) pending.delete(k);
 
-    console.log('Response Status:', resp.status);
-    const responseText = await resp.text();
-    console.log('Response Body:', responseText);
-
-    if (!resp.ok) {
-      throw new Error('Resend API error: ' + responseText);
-    }
-
-    const result = JSON.parse(responseText);
-    console.log('Email sent successfully:', result.id);
-    
-    return result;
-
-  } catch (error) {
-    console.error('Email sending failed:', error);
-    throw error;
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(400).json({ error: String(e.message || e) });
   }
-}
+});
 
 // Регистрация - проверка кода
 app.post('/api/register/verify', express.json(), (req, res) => {
