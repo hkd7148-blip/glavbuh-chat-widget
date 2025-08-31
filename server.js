@@ -564,6 +564,7 @@ function trackUserActivity(req, res, next) {
   next();
 }
 
+// Проверяем активность пользователя в authRequired
 function authRequired(req, res, next) {
   // Проверяем токен в разных местах
   const token = req.headers['x-gb-token'] || 
@@ -578,6 +579,16 @@ function authRequired(req, res, next) {
     return res.status(401).json({
       error: 'auth_required',
       message: 'Доступ к онлайн-помощнику только после регистрации или продления.'
+    });
+  }
+  
+  // Проверка активности аккаунта
+  const account = accounts.get(info.email);
+  if (!account || !account.isActive) {
+    console.log('Auth failed - account inactive:', info.email);
+    return res.status(403).json({
+      error: 'account_inactive',
+      message: 'Ваш аккаунт неактивен. Обратитесь к администратору.'
     });
   }
   
@@ -611,7 +622,7 @@ function adminRequired(req, res, next) {
   next();
 }
 
-// Статистика пользователей
+// Обновленная статистика пользователей
 app.get('/api/admin/users', adminRequired, (req, res) => {
   const users = [];
   for (const [email, account] of accounts) {
@@ -620,27 +631,151 @@ app.get('/api/admin/users', adminRequired, (req, res) => {
       email,
       name: account.name,
       phone: account.phone,
-      registeredAt: stats.registeredAt || account.expiresAt - (24*60*60*1000),
+      userType: account.userType || 'individual', // individual | legal
+      isActive: account.isActive !== false, // По умолчанию true для старых пользователей
+      activatedAt: account.activatedAt,
+      activatedBy: account.activatedBy,
+      registeredAt: stats.registeredAt || account.expiresAt - (7*24*60*60*1000),
       lastActive: stats.lastActive,
       requestCount: stats.requestCount || 0,
       isBlocked: stats.isBlocked || false,
       blockReason: stats.blockReason,
-      tokenExpiresAt: account.expiresAt
+      tokenExpiresAt: account.expiresAt,
+      accessFrom: new Date(account.activatedAt || stats.registeredAt || account.expiresAt - (7*24*60*60*1000)).toISOString().split('T')[0],
+      accessTo: new Date(account.expiresAt).toISOString().split('T')[0]
     });
   }
   
   // Сортируем по последней активности
   users.sort((a, b) => (b.lastActive || 0) - (a.lastActive || 0));
   
+  // Подсчет статистики
+  const totalUsers = users.length;
+  const individualUsers = users.filter(u => u.userType === 'individual').length;
+  const legalUsers = users.filter(u => u.userType === 'legal').length;
+  const activeUsers = users.filter(u => u.isActive && !u.isBlocked).length;
+  const blockedUsers = users.filter(u => u.isBlocked).length;
+  const inactiveUsers = users.filter(u => !u.isActive).length;
+  
   res.json({
-    total: users.length,
-    active: users.filter(u => !u.isBlocked).length,
-    blocked: users.filter(u => u.isBlocked).length,
+    total: totalUsers,
+    individual: individualUsers,
+    legal: legalUsers,
+    active: activeUsers,
+    blocked: blockedUsers,
+    inactive: inactiveUsers,
     users
   });
 });
 
-// Блокировка/разблокировка пользователя
+// Активация/деактивация пользователя
+app.post('/api/admin/users/:email/activate', adminRequired, express.json(), (req, res) => {
+  const { email } = req.params;
+  const { activate, days } = req.body; // days - на сколько дней продлить доступ
+  
+  if (!accounts.has(email)) {
+    return res.status(404).json({ error: 'Пользователь не найден' });
+  }
+  
+  const account = accounts.get(email);
+  const adminEmail = req.admin.email;
+  
+  account.isActive = Boolean(activate);
+  
+  if (activate) {
+    account.activatedAt = Date.now();
+    account.activatedBy = adminEmail;
+    
+    // Продлеваем доступ если указаны дни
+    if (days && days > 0) {
+      const additionalMs = days * 24 * 60 * 60 * 1000;
+      account.expiresAt = Date.now() + additionalMs;
+      
+      // Обновляем токен если он есть
+      for (const [token, tokenInfo] of tokens.entries()) {
+        if (tokenInfo.email === email) {
+          tokenInfo.expiresAt = account.expiresAt;
+          break;
+        }
+      }
+    }
+  } else {
+    account.deactivatedAt = Date.now();
+    account.deactivatedBy = adminEmail;
+  }
+  
+  accounts.set(email, account);
+  saveData();
+  
+  res.json({
+    email,
+    isActive: account.isActive,
+    activatedAt: account.activatedAt,
+    activatedBy: account.activatedBy,
+    deactivatedAt: account.deactivatedAt,
+    deactivatedBy: account.deactivatedBy,
+    expiresAt: account.expiresAt,
+    accessFrom: new Date(account.activatedAt || account.registeredAt).toISOString().split('T')[0],
+    accessTo: new Date(account.expiresAt).toISOString().split('T')[0]
+  });
+});
+
+// Изменение срока доступа пользователя
+app.post('/api/admin/users/:email/extend', adminRequired, express.json(), (req, res) => {
+  const { email } = req.params;
+  const { days, fromDate, toDate } = req.body;
+  
+  if (!accounts.has(email)) {
+    return res.status(404).json({ error: 'Пользователь не найден' });
+  }
+  
+  const account = accounts.get(email);
+  const adminEmail = req.admin.email;
+  
+  if (toDate) {
+    // Устанавливаем конкретную дату окончания
+    const endDate = new Date(toDate);
+    if (isNaN(endDate.getTime())) {
+      return res.status(400).json({ error: 'Некорректная дата окончания' });
+    }
+    account.expiresAt = endDate.getTime();
+  } else if (days) {
+    // Продлеваем на указанное количество дней
+    const additionalMs = days * 24 * 60 * 60 * 1000;
+    if (fromDate) {
+      const startDate = new Date(fromDate);
+      if (isNaN(startDate.getTime())) {
+        return res.status(400).json({ error: 'Некорректная дата начала' });
+      }
+      account.expiresAt = startDate.getTime() + additionalMs;
+    } else {
+      account.expiresAt = Date.now() + additionalMs;
+    }
+  }
+  
+  // Обновляем соответствующий токен
+  for (const [token, tokenInfo] of tokens.entries()) {
+    if (tokenInfo.email === email) {
+      tokenInfo.expiresAt = account.expiresAt;
+      break;
+    }
+  }
+  
+  account.lastExtendedAt = Date.now();
+  account.lastExtendedBy = adminEmail;
+  
+  accounts.set(email, account);
+  saveData();
+  
+  res.json({
+    email,
+    expiresAt: account.expiresAt,
+    accessFrom: new Date(account.activatedAt || account.registeredAt).toISOString().split('T')[0],
+    accessTo: new Date(account.expiresAt).toISOString().split('T')[0],
+    lastExtendedAt: account.lastExtendedAt,
+    lastExtendedBy: account.lastExtendedBy
+  });
+});
 app.post('/api/admin/users/:email/block', adminRequired, express.json(), (req, res) => {
   const { email } = req.params;
   const { block, reason } = req.body;
@@ -661,27 +796,52 @@ app.post('/api/admin/users/:email/block', adminRequired, express.json(), (req, r
   });
 });
 
-// Статистика системы
+// Обновленная статистика системы
 app.get('/api/admin/stats', adminRequired, (req, res) => {
   const now = Date.now();
   const day = 24 * 60 * 60 * 1000;
   
   let activeToday = 0;
   let totalRequests = 0;
+  let individualCount = 0;
+  let legalCount = 0;
+  let activeUsers = 0;
+  let inactiveUsers = 0;
   
-  for (const stats of userStats.values()) {
+  for (const [email, account] of accounts) {
+    const stats = userStats.get(email) || {};
+    
     if (stats.lastActive && (now - stats.lastActive) < day) {
       activeToday++;
     }
+    
     totalRequests += stats.requestCount || 0;
+    
+    if (account.userType === 'legal') {
+      legalCount++;
+    } else {
+      individualCount++;
+    }
+    
+    if (account.isActive !== false && !stats.isBlocked) {
+      activeUsers++;
+    } else {
+      inactiveUsers++;
+    }
   }
   
   res.json({
     totalUsers: accounts.size,
+    individualUsers: individualCount,
+    legalUsers: legalCount,
+    activeUsers,
+    inactiveUsers,
+    blockedUsers: Array.from(userStats.values()).filter(s => s.isBlocked).length,
     activeToday,
     totalRequests,
     pendingRegistrations: pending.size,
-    attachmentsCount: attachments.size
+    attachmentsCount: attachments.size,
+    lastUpdated: now
   });
 });
 
@@ -885,10 +1045,14 @@ app.post('/api/register/init', express.json(), async (req, res) => {
     const name  = String(req.body?.name  || '').trim();
     const phone = String(req.body?.phone || '').trim();
     const email = String(req.body?.email || '').trim().toLowerCase();
+    const userType = String(req.body?.userType || 'individual').trim(); // 'individual' или 'legal'
 
     if (!name || name.length < 3)  return res.status(400).json({ error: 'Укажите ФИО' });
     if (!isValidPhone(phone))      return res.status(400).json({ error: 'Укажите корректный телефон' });
     if (!isValidEmail(email))      return res.status(400).json({ error: 'Укажите корректный e-mail' });
+    if (!['individual', 'legal'].includes(userType)) {
+      return res.status(400).json({ error: 'Некорректный тип пользователя' });
+    }
 
     const old = pending.get(email);
     if (old && Date.now() - (old.lastSentAt || 0) < 60000) {
@@ -897,7 +1061,7 @@ app.post('/api/register/init', express.json(), async (req, res) => {
 
     const code = genCode();
     const expiresAt = Date.now() + 1000 * 60 * 10;
-    pending.set(email, { name, phone, code, expiresAt, lastSentAt: Date.now() });
+    pending.set(email, { name, phone, code, expiresAt, lastSentAt: Date.now(), userType });
 
     const subject = 'Код подтверждения — Ваш ГлавБух';
     const text = `Здравствуйте, ${name}!\n\nВаш код подтверждения: ${code}\nСрок действия: 10 минут.\n\nЕсли вы не запрашивали код, просто игнорируйте это письмо.`;
@@ -933,7 +1097,16 @@ app.post('/api/register/verify', express.json(), (req, res) => {
     const expiresAt = Date.now() + ttlMs;
     const token = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
 
-    accounts.set(email, { expiresAt, token, name: rec.name, phone: rec.phone });
+    accounts.set(email, { 
+      expiresAt, 
+      token, 
+      name: rec.name, 
+      phone: rec.phone,
+      userType: rec.userType || 'individual', // Сохраняем тип пользователя
+      isActive: true, // По умолчанию активен
+      activatedAt: Date.now(),
+      activatedBy: 'self' // Самостоятельная активация
+    });
     tokens.set(token, { email, expiresAt });
     pending.delete(email);
     
