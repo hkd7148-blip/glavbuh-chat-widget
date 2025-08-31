@@ -371,25 +371,32 @@ function isValidPhone(p = '') {
 }
 
 async function sendEmail(to, subject, text) {
-  // ВРЕМЕННО - пока не работают переменные окружения в Render
-  const apiKey = process.env.RESEND_API_KEY || 're_2S9K2GGp_H5wUSyWgLYpz7XDnfKyEHZi4';
+  const apiKey = process.env.RESEND_API_KEY;
   const from = process.env.FROM_EMAIL || 'noreply@glavbuh-chat.ru';
-  
-  console.log('\n=== EMAIL DEBUG START ===');
-  console.log('API Key:', apiKey ? `${apiKey.substring(0, 10)}...` : 'НЕТ');
-  console.log('From:', from);
-  console.log('To:', to);
-  console.log('========================\n');
   
   if (!apiKey) throw new Error('RESEND_API_KEY не задан');
 
-  try {
-    const payload = { 
-      from, 
+  const resp = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      from,
       to: [to],
-      subject, 
-      text 
-    };
+      subject,
+      text
+    })
+  });
+
+  if (!resp.ok) {
+    const errorText = await resp.text();
+    throw new Error(`Resend API error: ${errorText}`);
+  }
+
+  return await resp.json();
+}
     
     console.log('Payload:', JSON.stringify(payload, null, 2));
 
