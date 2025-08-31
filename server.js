@@ -468,6 +468,13 @@ function getTokenInfo(token = '') {
   if (Date.now() > rec.expiresAt) {
     // Очистить expired токены
     tokens.delete(token);
+    // Также очистить соответствующий account
+    for (const [email, account] of accounts.entries()) {
+      if (account.token === token) {
+        accounts.delete(email);
+        break;
+      }
+    }
     return null;
   }
   return rec;
@@ -493,9 +500,16 @@ function trackUserActivity(req, res, next) {
 }
 
 function authRequired(req, res, next) {
-  const token = req.headers['x-gb-token'] || '';
+  // Проверяем токен в разных местах
+  const token = req.headers['x-gb-token'] || 
+                req.headers['authorization']?.replace('Bearer ', '') || 
+                getCookie(req, 'gb_token') || '';
+                
+  console.log('Auth check - token:', token ? `${token.slice(0, 8)}...` : 'none');
+  
   const info = getTokenInfo(String(token));
   if (!info) {
+    console.log('Auth failed - no valid token info');
     return res.status(401).json({
       error: 'auth_required',
       message: 'Доступ к онлайн-помощнику только после регистрации или продления.'
@@ -505,12 +519,14 @@ function authRequired(req, res, next) {
   // Проверка блокировки пользователя
   const stats = userStats.get(info.email);
   if (stats?.isBlocked) {
+    console.log('Auth failed - user blocked:', info.email);
     return res.status(403).json({
       error: 'user_blocked',
       message: stats.blockReason || 'Ваш аккаунт заблокирован администратором'
     });
   }
   
+  console.log('Auth success for:', info.email);
   req.user = { email: info.email, expiresAt: info.expiresAt };
   next();
 }
@@ -871,7 +887,100 @@ app.post('/api/register/verify', express.json(), (req, res) => {
   }
 });
 
-// Добавим новый endpoint для проверки статуса пользователя
+// Добавим endpoint для отладки токена
+app.get('/api/debug/token', express.json(), (req, res) => {
+  const token = req.headers['x-gb-token'] || 
+                req.headers['authorization']?.replace('Bearer ', '') || 
+                getCookie(req, 'gb_token') || '';
+                
+  const info = getTokenInfo(String(token));
+  
+  res.json({
+    hasToken: !!token,
+    tokenPrefix: token ? token.slice(0, 8) + '...' : null,
+    isValid: !!info,
+    email: info?.email || null,
+    expiresAt: info?.expiresAt || null,
+    timeToExpiry: info ? info.expiresAt - Date.now() : null,
+    totalTokens: tokens.size,
+    totalAccounts: accounts.size
+  });
+});
+
+// Добавим endpoint для тестирования без авторизации
+app.post('/api/test-chat', express.json(), async (req, res) => {
+  try {
+    const { messages } = req.body || {};
+    if (!Array.isArray(messages)) {
+      return res.status(400).json({ error: 'messages must be an array' });
+    }
+
+    const systemPrompt = `Ты — тестовый помощник. Отвечай кратко.`;
+
+    const body = {
+      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+      stream: true,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        ...messages
+      ],
+      temperature: 0.3,
+      max_tokens: 200
+    };
+
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
+
+    const upstream = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body)
+    });
+
+    if (!upstream.ok || !upstream.body) {
+      const errText = await upstream.text();
+      res.write(`data: ${JSON.stringify({ error: 'upstream_error', detail: errText })}\n\n`);
+      return res.end();
+    }
+
+    const reader = upstream.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buf = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+
+      const chunks = buf.split('\n\n');
+      buf = chunks.pop() || '';
+      for (const chunk of chunks) {
+        const line = chunk.trim();
+        if (!line.startsWith('data:')) continue;
+        const payload = line.slice(5).trim();
+        if (payload === '[DONE]') {
+          res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+          return res.end();
+        }
+        try {
+          const json = JSON.parse(payload);
+          const delta = json.choices?.[0]?.delta?.content;
+          if (delta) res.write(`data: ${JSON.stringify({ delta })}\n\n`);
+        } catch {}
+      }
+    }
+
+    res.end();
+  } catch (e) {
+    res.write(`data: ${JSON.stringify({ error: 'test_error', detail: String(e) })}\n\n`);
+    res.end();
+  }
+});
 app.get('/api/user/status', authRequired, (req, res) => {
   const email = req.user.email;
   const account = accounts.get(email);
@@ -912,11 +1021,15 @@ app.use((err, req, res, next) => {
 // Статика
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Виджет
+// Виджет с улучшенной отладкой
 app.get('/widget', (req, res) => {
   const token = getCookie(req, 'gb_token');
+  console.log('Widget access - cookie token:', token ? `${token.slice(0, 8)}...` : 'none');
+  
   const info = token ? tokens.get(token) : null;
   const valid = info && Date.now() < info.expiresAt;
+  
+  console.log('Widget access - token valid:', valid, 'user:', info?.email);
 
   if (!valid) {
     return res.send(`
@@ -930,12 +1043,19 @@ app.get('/widget', (req, res) => {
         .card{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:16px}
         a.button{display:inline-block;padding:10px 16px;border-radius:10px;background:#10B981;color:#fff;text-decoration:none;font-weight:700}
         .muted{font-size:13px;color:#6B7280}
+        .debug{background:#f3f4f6;padding:12px;border-radius:8px;font-family:monospace;font-size:12px;margin:16px 0}
       </style>
       <div class="wrap">
         <div class="card">
           <h1 style="margin:0 0 6px;color:#1E3A8A;font-size:20px">Доступ только для зарегистрированных</h1>
           <p class="muted">Чтобы открыть чат онлайн-помощника, пройдите регистрацию и подтвердите e-mail. Это займёт минуту.</p>
           <p><a class="button" href="/register">Зарегистрироваться</a></p>
+          <div class="debug">
+            Debug: token=${token ? token.slice(0, 8) + '...' : 'none'}, 
+            valid=${valid}, 
+            totalTokens=${tokens.size},
+            time=${new Date().toISOString()}
+          </div>
         </div>
       </div>
     `);
