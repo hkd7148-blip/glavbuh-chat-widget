@@ -84,7 +84,7 @@ loadData();
 
 /* ================== СТАТИСТИКА И АДМИНИСТРИРОВАНИЕ ================== */
 const userStats = new Map(); // email -> { registeredAt, lastActive, requestCount, isBlocked, blockReason }
-const adminUsers = new Set(['admin@glavbuh-chat.ru']); // список админов
+const adminUsers = new Set(['admin@glavbuh-chat.ru', 'glavbuh.chat@gmail.com']); // список админов
 
 /* ================== ЗАГРУЗКА ФАЙЛОВ ================== */
 const upload = multer({
@@ -957,7 +957,119 @@ app.post('/api/register/verify', express.json(), (req, res) => {
   }
 });
 
-// Добавим endpoint для быстрой повторной регистрации (для отладки)
+// Добавим endpoint для создания админского токена
+app.post('/api/create-admin', express.json(), async (req, res) => {
+  try {
+    const { email, secret } = req.body;
+    
+    // Простая защита - секретный ключ из ENV или дефолтный
+    const adminSecret = process.env.ADMIN_SECRET || 'admin123';
+    
+    if (secret !== adminSecret) {
+      return res.status(403).json({ error: 'Неверный секретный ключ' });
+    }
+    
+    if (!adminUsers.has(email)) {
+      return res.status(403).json({ error: 'Email не в списке администраторов' });
+    }
+
+    const ttlMs = 1000 * 60 * 60 * 24 * 30; // 30 дней
+    const expiresAt = Date.now() + ttlMs;
+    const token = 'admin_' + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+
+    // Создаем аккаунт админа
+    accounts.set(email, { 
+      expiresAt, 
+      token, 
+      name: 'Administrator', 
+      phone: '+70000000000',
+      isAdmin: true 
+    });
+    tokens.set(token, { email, expiresAt, isAdmin: true });
+    
+    // Инициализируем статистику
+    userStats.set(email, {
+      registeredAt: Date.now(),
+      lastActive: Date.now(),
+      requestCount: 0,
+      isBlocked: false,
+      blockReason: null
+    });
+
+    // Сохраняем данные сразу
+    saveData();
+    
+    console.log(`Админ токен создан для: ${email}, токен: ${token.slice(0, 12)}...`);
+
+    return res.json({ 
+      ok: true, 
+      email, 
+      token, 
+      expiresAt,
+      message: 'Админский токен создан',
+      instructions: `Используйте этот токен в заголовке x-gb-token или в админ-панели`
+    });
+  } catch (e) {
+    return res.status(400).json({ error: String(e.message || e) });
+  }
+});
+
+// Простой endpoint для получения админского токена по секрету
+app.get('/api/admin-token/:secret', (req, res) => {
+  const { secret } = req.params;
+  const adminSecret = process.env.ADMIN_SECRET || 'admin123';
+  
+  if (secret !== adminSecret) {
+    return res.status(403).json({ error: 'Неверный секретный ключ' });
+  }
+  
+  const email = 'glavbuh.chat@gmail.com';
+  
+  // Ищем существующий токен
+  for (const [token, tokenInfo] of tokens.entries()) {
+    if (tokenInfo.email === email && tokenInfo.expiresAt > Date.now()) {
+      return res.json({
+        ok: true,
+        email,
+        token,
+        expiresAt: tokenInfo.expiresAt,
+        message: 'Существующий админский токен'
+      });
+    }
+  }
+  
+  // Создаем новый токен
+  const ttlMs = 1000 * 60 * 60 * 24 * 30; // 30 дней
+  const expiresAt = Date.now() + ttlMs;
+  const token = 'admin_' + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+
+  accounts.set(email, { 
+    expiresAt, 
+    token, 
+    name: 'Administrator', 
+    phone: '+70000000000',
+    isAdmin: true 
+  });
+  tokens.set(token, { email, expiresAt, isAdmin: true });
+  
+  userStats.set(email, {
+    registeredAt: Date.now(),
+    lastActive: Date.now(),
+    requestCount: 0,
+    isBlocked: false,
+    blockReason: null
+  });
+
+  saveData();
+  
+  return res.json({
+    ok: true,
+    email,
+    token,
+    expiresAt,
+    message: 'Новый админский токен создан'
+  });
+});
 app.post('/api/quick-register', express.json(), async (req, res) => {
   try {
     const email = 'test@glavbuh-chat.ru';
