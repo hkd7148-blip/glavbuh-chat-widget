@@ -397,37 +397,6 @@ async function sendEmail(to, subject, text) {
 
   return await resp.json();
 }
-    
-    console.log('Payload:', JSON.stringify(payload, null, 2));
-
-    const resp = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(payload)
-    });
-
-    console.log('Response Status:', resp.status);
-    const responseText = await resp.text();
-    console.log('Response Body:', responseText);
-
-    if (!resp.ok) {
-      throw new Error('Resend API error: ' + responseText);
-    }
-
-    const result = JSON.parse(responseText);
-    console.log('Email sent successfully:', result.id);
-    
-    return result;
-
-  } catch (error) {
-    console.error('Email sending failed:', error);
-    throw error;
-  }
-}
-
 /* ================== АВТОРИЗАЦИЯ ================== */
 function getTokenInfo(token = '') {
   if (!token) return null;
