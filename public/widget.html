@@ -24,46 +24,48 @@
 <body>
   <div class="wrap">
     <div class="title">Ваш ГлавБух — онлайн помощник 24/7</div>
-    <div class="note">🔒 Не отправляйте персональные данные. Для защиты используйте <a href="/anonimize/" target="_blank">обезличиватель</a>.</div>
+    <div class="note">🔒 Не отправляйте персональные данные. Для защиты используйте <a href="/anon/" target="_blank">обезличиватель</a>.</div>
 
     <div id="chat" class="panel"></div>
 
     <form id="form" class="composer">
-  <input id="file" type="file" accept=".pdf,.docx,.txt" style="max-width:220px">
-  <textarea id="input" rows="2" placeholder="Напишите вопрос по налогам, отчётности, учёту…"></textarea>
-  <button id="send" type="submit">Отправить</button>
-</form>
-<div id="attachInfo" style="font-size:12px;color:#6B7280;margin-top:6px"></div>
+      <input id="file" type="file" accept=".pdf,.docx,.txt" style="max-width:220px">
+      <textarea id="input" rows="2" placeholder="Напишите вопрос по налогам, отчётности, учёту…"></textarea>
+      <button id="send" type="submit">Отправить</button>
+    </form>
+    <div id="attachInfo" style="font-size:12px;color:#6B7280;margin-top:6px"></div>
+  </div>
 
   <script>
-  let attachmentId = null;
-  const fileEl = document.getElementById('file');
-  const attachInfo = document.getElementById('attachInfo');
+    let attachmentId = null;
+    const fileEl = document.getElementById('file');
+    const attachInfo = document.getElementById('attachInfo');
 
-  fileEl.addEventListener('change', async () => {
-    const f = fileEl.files[0];
-    if (!f) return;
-    attachInfo.textContent = 'Загрузка…';
-    try {
-      const fd = new FormData();
-      fd.append('file', f);
-      const token = localStorage.getItem('gb_token') || '';
-const resp = await fetch('/api/upload', {
-  method: 'POST',
-  headers: { 'x-gb-token': token },
-  body: fd
-});
-  const data = await resp.json();
-      if (!resp.ok || data.error) throw new Error(data.error || 'Ошибка загрузки');
+    fileEl.addEventListener('change', async () => {
+      const f = fileEl.files[0];
+      if (!f) return;
+      attachInfo.textContent = 'Загрузка…';
+      try {
+        const fd = new FormData();
+        fd.append('file', f);
+        const token = localStorage.getItem('gb_token') || '';
+        const resp = await fetch('/api/upload', {
+          method: 'POST',
+          headers: { 'x-gb-token': token },
+          body: fd
+        });
+        const data = await resp.json();
+        if (!resp.ok || data.error) throw new Error(data.error || 'Ошибка загрузки');
 
-      attachmentId = data.id;
-      attachInfo.textContent = `Прикреплён: ${data.name} (текст ${data.length} символов)`;
-    } catch (e) {
-      attachmentId = null;
-      attachInfo.textContent = 'Не удалось загрузить файл. Убедитесь, что формат PDF/DOCX/TXT и размер до 10 МБ.';
-      fileEl.value = '';
-    }
-  });
+        attachmentId = data.id;
+        attachInfo.textContent = `Прикреплён: ${data.name} (текст ${data.length} символов)`;
+      } catch (e) {
+        attachmentId = null;
+        attachInfo.textContent = 'Не удалось загрузить файл. Убедитесь, что формат PDF/DOCX/TXT и размер до 10 МБ.';
+        fileEl.value = '';
+      }
+    });
+
     const chat = document.getElementById('chat');
     const form = document.getElementById('form');
     const input = document.getElementById('input');
@@ -80,18 +82,19 @@ const resp = await fetch('/api/upload', {
       chat.scrollTop = chat.scrollHeight;
       return b;
     }
-// Если нет токена — прячем интерфейс и предлагаем регистрацию
-(function gate() {
-  const token = localStorage.getItem('gb_token') || '';
-  if (!token) {
-    const wrap = document.querySelector('.wrap');
-    wrap.innerHTML = `
-      <div class="title">Доступ только для зарегистрированных</div>
-      <div class="note">Чтобы открыть чат онлайн-помощника, пройдите регистрацию и подтвердите e-mail.</div>
-      <p><a href="/register" style="display:inline-block;padding:10px 16px;border-radius:10px;background:#10B981;color:#fff;text-decoration:none;font-weight:700">Зарегистрироваться</a></p>
-    `;
-  }
-})();
+
+    // Если нет токена — прячем интерфейс и предлагаем регистрацию
+    (function gate() {
+      const token = localStorage.getItem('gb_token') || '';
+      if (!token) {
+        const wrap = document.querySelector('.wrap');
+        wrap.innerHTML = `
+          <div class="title">Доступ только для зарегистрированных</div>
+          <div class="note">Чтобы открыть чат онлайн-помощника, пройдите регистрацию и подтвердите e-mail.</div>
+          <p><a href="/register" style="display:inline-block;padding:10px 16px;border-radius:10px;background:#10B981;color:#fff;text-decoration:none;font-weight:700">Зарегистрироваться</a></p>
+        `;
+      }
+    })();
     
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -103,24 +106,18 @@ const resp = await fetch('/api/upload', {
       sendBtn.disabled = true;
 
       const a = add('assistant', '…');
-const token = localStorage.getItem('gb_token') || '';
-const resp = await fetch('/api/chat_plus', {
-  method: 'POST',
-  headers: { 
-    'Content-Type': 'application/json',
-    'x-gb-token': token
-  },
-  body: JSON.stringify({ messages: [{ role: 'user', content: q }], attachmentId })
-});
-
+      
       try {
-        const resp = await fetch('/api/chat', {
+        const token = localStorage.getItem('gb_token') || '';
+        const resp = await fetch('/api/chat_plus', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
-           messages: [{ role: 'user', content: q }],
-           attachmentId
-          })
+          headers: { 
+            'Content-Type': 'application/json',
+            'x-gb-token': token
+          },
+          body: JSON.stringify({ messages: [{ role: 'user', content: q }], attachmentId })
+        });
+
         if (!resp.ok || !resp.body) throw new Error('No stream');
 
         const reader = resp.body.getReader();
@@ -139,9 +136,15 @@ const resp = await fetch('/api/chat_plus', {
             const json = line.slice(5).trim();
             try {
               const { delta, done, error } = JSON.parse(json);
-              if (error) { a.textContent = 'Перегрузка или ошибка. Попробуйте ещё раз.'; break; }
+              if (error) { 
+                a.textContent = 'Перегрузка или ошибка. Попробуйте ещё раз.'; 
+                break; 
+              }
               if (done) break;
-              if (delta) a.textContent += delta;
+              if (delta) {
+                if (a.textContent === '…') a.textContent = '';
+                a.textContent += delta;
+              }
             } catch {}
           }
           chat.scrollTop = chat.scrollHeight;
