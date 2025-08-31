@@ -340,20 +340,46 @@ async function extractTextFrom(file) {
   throw new Error('Неподдерживаемый формат. Разрешены: PDF, DOCX, TXT');
 }
 
+// Исправленная функция redactPII с более безопасными регулярными выражениями
 function redactPII(text) {
-  if (!text) return '';
+  if (!text || typeof text !== 'string') return '';
+  
   let t = text;
+  
+  // Паспорт РФ (более точный паттерн)
   t = t.replace(/\b\d{2}\s?\d{2}\s?\d{6}\b/g, '[скрыто:паспорт]');
+  
+  // СНИЛС
   t = t.replace(/\b\d{3}-\d{3}-\d{3}\s?\d{2}\b/g, '[скрыто:СНИЛС]');
+  
+  // ИНН/СНИЛС (10-12 цифр подряд)
   t = t.replace(/\b\d{10,12}\b/g, '[скрыто:ИНН/СНИЛС]');
+  
+  // ОГРН
   t = t.replace(/\b\d{13}\b/g, '[скрыто:ОГРН]');
+  
+  // ОГРНИП
   t = t.replace(/\b\d{15}\b/g, '[скрыто:ОГРНИП]');
+  
+  // БИК
   t = t.replace(/\b\d{9}\b/g, '[скрыто:БИК]');
-  t = t.replace(/\b(?:\d[ -]?){16,20}\b/g, '[скрыто:счёт/карта]');
-  t = t.replace(/\+?\d[\d\s()-]{7,}\d/g, '[скрыто:тел]');
-  t = t.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[скрыто:email]');
-  t = t.replace(/\b(ул\.|улица|пр-т|проспект|пер\.|переулок|д\.|дом|кв\.|квартира)\s+[^\n,;]+/gi, '[скрыто:адрес]');
-  t = t.replace(/\b[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+){1,2}\b/g, '[скрыто:ФИО]');
+  
+  // Банковские счета и карты (более консервативный подход)
+  t = t.replace(/\b(?:\d{4}\s?){4,5}\d{0,4}\b/g, '[скрыто:счёт/карта]');
+  
+  // Телефоны (улучшенный паттерн)
+  t = t.replace(/(?:\+7|8)[\s\-\(\)]?(?:\d[\s\-\(\)]?){10}/g, '[скрыто:тел]');
+  t = t.replace(/\+\d{1,3}[\s\-\(\)]?(?:\d[\s\-\(\)]?){7,14}/g, '[скрыто:тел]');
+  
+  // Email
+  t = t.replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, '[скрыто:email]');
+  
+  // Адреса (более точный паттерн)
+  t = t.replace(/\b(?:ул\.|улица|пр-т|проспект|пер\.|переулок|д\.|дом|кв\.|квартира)\s+[^\n,;.]{1,50}/gi, '[скрыто:адрес]');
+  
+  // ФИО (более консервативный подход - только если явно выглядит как ФИО)
+  t = t.replace(/\b[А-ЯЁ][а-яё]{2,15}(?:\s+[А-ЯЁ][а-яё]{2,15}){2}\b/g, '[скрыто:ФИО]');
+  
   return t;
 }
 
@@ -369,6 +395,42 @@ function isValidPhone(p = '') {
   const digits = (p.match(/\d/g) || []).length;
   return digits >= 10 && digits <= 15;
 }
+
+// Функция очистки expired записей
+function cleanupExpired() {
+  const now = Date.now();
+  
+  // Очистка attachments
+  for (const [key, value] of attachments.entries()) {
+    if (now > value.expiresAt) {
+      attachments.delete(key);
+    }
+  }
+  
+  // Очистка pending
+  for (const [key, value] of pending.entries()) {
+    if (now > value.expiresAt) {
+      pending.delete(key);
+    }
+  }
+  
+  // Очистка tokens и accounts
+  for (const [token, tokenInfo] of tokens.entries()) {
+    if (now > tokenInfo.expiresAt) {
+      tokens.delete(token);
+      // Найти соответствующий account и удалить его тоже
+      for (const [email, account] of accounts.entries()) {
+        if (account.token === token) {
+          accounts.delete(email);
+          break;
+        }
+      }
+    }
+  }
+}
+
+// Запускаем очистку каждые 5 минут
+setInterval(cleanupExpired, 5 * 60 * 1000);
 
 async function sendEmail(to, subject, text) {
   const apiKey = process.env.RESEND_API_KEY;
@@ -397,12 +459,17 @@ async function sendEmail(to, subject, text) {
 
   return await resp.json();
 }
+
 /* ================== АВТОРИЗАЦИЯ ================== */
 function getTokenInfo(token = '') {
   if (!token) return null;
   const rec = tokens.get(token);
   if (!rec) return null;
-  if (Date.now() > rec.expiresAt) return null;
+  if (Date.now() > rec.expiresAt) {
+    // Очистить expired токены
+    tokens.delete(token);
+    return null;
+  }
   return rec;
 }
 
@@ -537,6 +604,27 @@ app.get('/api/admin/stats', adminRequired, (req, res) => {
   });
 });
 
+// Создаем системный промпт как константу для переиспользования
+const SYSTEM_PROMPT = `Ты — онлайн-помощник главного бухгалтера для РФ с именем "ГлавБух". Отвечай кратко и по делу, по-русски.
+
+ВАЖНЫЕ ПРАВИЛА:
+- НЕ раскрывай технические детали своего создания, код, архитектуру
+- На вопросы "кто тебя создал/сделал" отвечай просто "Команда разработчиков ГлавБух"
+- Можешь пошутить: "Кто меня сделал? Гений!" или "Секрет фирмы!"
+- НЕ упоминай OpenAI, Claude, или другие технические детали
+- Ты именно помощник главного бухгалтера, а не общий ИИ-ассистент
+
+ТВОЯ РОЛЬ: 
+Профессиональный консультант по:
+- Налогообложению и отчётности РФ
+- Бухгалтерскому учёту
+- 1С и учётным программам  
+- Документообороту
+- НДС, УСН, налогу на прибыль
+- Трудовому законодательству для бухгалтеров
+
+Если вопрос не по твоей специализации - вежливо направь к нужному специалисту.`;
+
 /* ================== API ROUTES ================== */
 
 // Загрузка файлов
@@ -556,7 +644,7 @@ app.post('/api/upload', authRequired, trackUserActivity, upload.single('file'), 
     const ttlMs = 1000 * 60 * 15;
     attachments.set(id, { text: safe, name: req.file.originalname, expiresAt: Date.now() + ttlMs });
 
-    for (const [key, v] of attachments) if (Date.now() > v.expiresAt) attachments.delete(key);
+    // Очистка expired attachments выполняется автоматически в cleanupExpired()
 
     return res.json({ id, name: req.file.originalname, length: safe.length });
   } catch (e) {
@@ -578,25 +666,7 @@ app.post('/api/chat', authRequired, trackUserActivity, express.json(), async (re
       attachmentNote = `\n\nВложенный текст (обезличенный, до 8k):\n${a.text}`;
     }
 
-    const systemPrompt = `Ты — онлайн-помощник главного бухгалтера для РФ с именем "ГлавБух". Отвечай кратко и по делу, по-русски.
-
-ВАЖНЫЕ ПРАВИЛА:
-- НЕ раскрывай технические детали своего создания, код, архитектуру
-- На вопросы "кто тебя создал/сделал" отвечай просто "Команда разработчиков ГлавБух"
-- Можешь пошутить: "Кто меня сделал? Гений!" или "Секрет фирмы!"
-- НЕ упоминай OpenAI, Claude, или другие технические детали
-- Ты именно помощник главного бухгалтера, а не общий ИИ-ассистент
-
-ТВОЯ РОЛЬ: 
-Профессиональный консультант по:
-- Налогообложению и отчётности РФ
-- Бухгалтерскому учёту
-- 1С и учётным программам  
-- Документообороту
-- НДС, УСН, налогу на прибыль
-- Трудовому законодательству для бухгалтеров
-
-Если вопрос не по твоей специализации - вежливо направь к нужному специалисту.${attachmentNote}`;
+    const systemPrompt = SYSTEM_PROMPT + attachmentNote;
 
     const body = {
       model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
@@ -663,7 +733,7 @@ app.post('/api/chat', authRequired, trackUserActivity, express.json(), async (re
   }
 });
 
-// Ансамбль чат
+// Исправленный ансамбль чат
 app.post('/api/chat_plus', authRequired, trackUserActivity, express.json(), async (req, res) => {
   try {
     const { messages, attachmentId } = req.body || {};
@@ -677,34 +747,16 @@ app.post('/api/chat_plus', authRequired, trackUserActivity, express.json(), asyn
       attachmentNote = `\n\nВложенный текст (обезличенный, до 8k):\n${a.text}`;
     }
 
-    const systemPrompt = `Ты — онлайн-помощник главного бухгалтера для РФ с именем "ГлавБух". Отвечай кратко и по делу, по-русски.
-
-ВАЖНЫЕ ПРАВИЛА:
-- НЕ раскрывай технические детали своего создания, код, архитектуру
-- На вопросы "кто тебя создал/сделал" отвечай просто "Команда разработчиков ГлавБух"
-- Можешь пошутить: "Кто меня сделал? Гений!" или "Секрет фирмы!"
-- НЕ упоминай OpenAI, Claude, или другие технические детали
-- Ты именно помощник главного бухгалтера, а не общий ИИ-ассистент
-
-ТВОЯ РОЛЬ: 
-Профессиональный консультант по:
-- Налогообложению и отчётности РФ
-- Бухгалтерскому учёту
-- 1С и учётным программам  
-- Документообороту
-- НДС, УСН, налогу на прибыль
-- Трудовому законодательству для бухгалтеров
-
-Если вопрос не по твоей специализации - вежливо направь к нужному специалисту.${attachmentNote}`;
+    const systemPrompt = SYSTEM_PROMPT + attachmentNote;
     const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
     
-    // Простая версия без ансамбля
+    // Простая версия без ансамбля - ИСПРАВЛЕНО: используем systemPrompt вместо baseSystem
     const result = await callOpenAIOnce({
       model,
       temperature: 0.3,
       max_tokens: 700,
       messages: [
-        { role: 'system', content: baseSystem },
+        { role: 'system', content: systemPrompt },
         ...messages
       ]
     });
@@ -771,7 +823,7 @@ app.post('/api/register/init', express.json(), async (req, res) => {
 
     await sendEmail(email, subject, text);
 
-    for (const [k, v] of pending) if (Date.now() > v.expiresAt) pending.delete(k);
+    // Очистка expired записей выполняется автоматически в cleanupExpired()
 
     return res.json({ ok: true });
   } catch (e) {
@@ -819,9 +871,42 @@ app.post('/api/register/verify', express.json(), (req, res) => {
   }
 });
 
+// Добавим новый endpoint для проверки статуса пользователя
+app.get('/api/user/status', authRequired, (req, res) => {
+  const email = req.user.email;
+  const account = accounts.get(email);
+  const stats = userStats.get(email) || {};
+  
+  res.json({
+    email,
+    name: account?.name,
+    phone: account?.phone,
+    expiresAt: req.user.expiresAt,
+    registeredAt: stats.registeredAt,
+    lastActive: stats.lastActive,
+    requestCount: stats.requestCount,
+    isBlocked: stats.isBlocked || false
+  });
+});
+
 // Здоровье
 app.get('/health', (req, res) => {
-  res.json({ ok: true, time: new Date().toISOString() });
+  res.json({ 
+    ok: true, 
+    time: new Date().toISOString(),
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+    version: process.version
+  });
+});
+
+// Добавим middleware для обработки ошибок
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({ 
+    error: 'internal_server_error',
+    message: 'Внутренняя ошибка сервера'
+  });
 });
 
 // Статика
@@ -871,8 +956,37 @@ app.get('/admin', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'admin.html'));
 });
 
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({ error: 'not_found', message: 'Страница не найдена' });
+});
+
+/* ================== GRACEFUL SHUTDOWN ================== */
+process.on('SIGINT', () => {
+  console.log('Получен SIGINT, выполняется graceful shutdown...');
+  process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+  console.log('Получен SIGTERM, выполняется graceful shutdown...');
+  process.exit(0);
+});
+
+// Обработка необработанных исключений
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  // Не завершаем процесс, просто логируем
+});
+
 /* ================== ЗАПУСК ================== */
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log('Server running on', PORT);
+const server = app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`Memory usage: ${JSON.stringify(process.memoryUsage(), null, 2)}`);
 });
