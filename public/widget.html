@@ -104,11 +104,11 @@ const resp = await fetch('/api/upload', {
 
       const a = add('assistant', '…');
 const token = localStorage.getItem('gb_token') || '';
-const resp = await fetch('/api/chat_plus', { ... })
+const resp = await fetch('/api/chat_plus', {
   method: 'POST',
   headers: { 
     'Content-Type': 'application/json',
-    'x-gb-token': token   // <-- добавили токен в заголовок (на следующем шаге начнем проверять)
+    'x-gb-token': token
   },
   body: JSON.stringify({ messages: [{ role: 'user', content: q }], attachmentId })
 });
