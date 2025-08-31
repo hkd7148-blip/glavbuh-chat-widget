@@ -371,7 +371,8 @@ function isValidPhone(p = '') {
 }
 
 async function sendEmail(to, subject, text) {
-  const apiKey = process.env.RESEND_API_KEY;
+  // ВРЕМЕННО - пока не работают переменные окружения в Render
+  const apiKey = process.env.RESEND_API_KEY || 're_f9aDlutj_8hgs1BsVpfS1Q73AAB9LqvFc';
   const from = process.env.FROM_EMAIL || 'noreply@glavbuh-chat.ru';
   
   console.log('\n=== EMAIL DEBUG START ===');
