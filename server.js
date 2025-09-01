@@ -1,10 +1,15 @@
-import 'dotenv/config';
+// Создаем системный промпт как константу для переиспользования
+const SYSTEM_PROMPT = `Ты — онлайн-помощник главного бухгалтера для РФ с именем "ГлавБух". Отвечай кратко и по делу, по-русски.
+
+ВАЖНЫЕ ПРАВИЛА:
+- НЕ раскimport 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import multer from 'multer';
 import mammoth from 'mammoth';
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
+import fs from 'fs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -16,6 +21,10 @@ const attachments = new Map(); // id -> { text, name, expiresAt }
 const accounts    = new Map(); // email -> { expiresAt, token, name, phone }
 const tokens      = new Map(); // token -> { email, expiresAt }
 const pending     = new Map(); // email -> { name, phone, code, expiresAt, lastSentAt }
+
+/* ================== RAG СИСТЕМА ================== */
+const knowledgeBase = new Map(); // id -> { title, content, chunks, embeddings, uploadedAt }
+const documentChunks = new Map(); // chunkId -> { docId, text, embedding, metadata }
 
 /* ================== ПОСТОЯННОЕ ХРАНЕНИЕ ================== */
 import fs from 'fs';
@@ -53,7 +62,20 @@ function loadData() {
         }
       }
       
-      console.log(`Данные загружены: ${accounts.size} аккаунтов, ${tokens.size} токенов`);
+      // Восстанавливаем базу знаний
+      if (data.knowledgeBase) {
+        for (const [docId, doc] of Object.entries(data.knowledgeBase)) {
+          knowledgeBase.set(docId, doc);
+        }
+      }
+      
+      if (data.documentChunks) {
+        for (const [chunkId, chunk] of Object.entries(data.documentChunks)) {
+          documentChunks.set(chunkId, chunk);
+        }
+      }
+      
+      console.log(`Данные загружены: ${accounts.size} аккаунтов, ${tokens.size} токенов, ${knowledgeBase.size} документов, ${documentChunks.size} частей`);
     }
   } catch (error) {
     console.error('Ошибка загрузки данных:', error);
@@ -67,10 +89,13 @@ function saveData() {
       accounts: Object.fromEntries(accounts),
       tokens: Object.fromEntries(tokens),
       userStats: Object.fromEntries(userStats),
+      knowledgeBase: Object.fromEntries(knowledgeBase),
+      documentChunks: Object.fromEntries(documentChunks),
       savedAt: Date.now()
     };
     
     fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+    console.log(`Данные сохранены: ${accounts.size} аккаунтов, ${knowledgeBase.size} документов, ${documentChunks.size} частей`);
   } catch (error) {
     console.error('Ошибка сохранения данных:', error);
   }
@@ -92,7 +117,129 @@ const upload = multer({
   limits: { fileSize: 10 * 1024 * 1024 } // 10 МБ
 });
 
-/* ================== УТИЛИТЫ ================== */
+/* ================== RAG ФУНКЦИИ ================== */
+
+// Разбивка текста на чанки
+function splitIntoChunks(text, chunkSize = 1000, overlap = 200) {
+  const chunks = [];
+  const sentences = text.split(/[.!?]+/).filter(s => s.trim().length > 0);
+  
+  let currentChunk = '';
+  let currentSize = 0;
+  
+  for (const sentence of sentences) {
+    const sentenceSize = sentence.trim().length;
+    
+    if (currentSize + sentenceSize > chunkSize && currentChunk.length > 0) {
+      chunks.push(currentChunk.trim());
+      
+      // Overlap - берем последние предложения для связности
+      const words = currentChunk.split(' ');
+      const overlapWords = words.slice(-Math.floor(overlap / 5)); // примерно overlap символов
+      currentChunk = overlapWords.join(' ') + ' ' + sentence.trim();
+      currentSize = currentChunk.length;
+    } else {
+      currentChunk += (currentChunk ? '. ' : '') + sentence.trim();
+      currentSize = currentChunk.length;
+    }
+  }
+  
+  if (currentChunk.trim().length > 0) {
+    chunks.push(currentChunk.trim());
+  }
+  
+  return chunks;
+}
+
+// Получение embeddings от OpenAI
+async function getEmbeddings(texts) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    throw new Error('OPENAI_API_KEY не установлен');
+  }
+  
+  try {
+    const response = await fetch('https://api.openai.com/v1/embeddings', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'text-embedding-3-small', // или text-embedding-ada-002
+        input: Array.isArray(texts) ? texts : [texts]
+      })
+    });
+    
+    if (!response.ok) {
+      throw new Error(`OpenAI API Error: ${response.status}`);
+    }
+    
+    const data = await response.json();
+    return data.data.map(item => item.embedding);
+  } catch (error) {
+    console.error('Ошибка получения embeddings:', error);
+    throw error;
+  }
+}
+
+// Вычисление косинусного сходства
+function cosineSimilarity(vecA, vecB) {
+  if (vecA.length !== vecB.length) {
+    throw new Error('Векторы должны быть одинаковой длины');
+  }
+  
+  let dotProduct = 0;
+  let normA = 0;
+  let normB = 0;
+  
+  for (let i = 0; i < vecA.length; i++) {
+    dotProduct += vecA[i] * vecB[i];
+    normA += vecA[i] * vecA[i];
+    normB += vecB[i] * vecB[i];
+  }
+  
+  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+// Поиск релевантных чанков
+async function searchKnowledge(query, topK = 3) {
+  if (documentChunks.size === 0) {
+    return [];
+  }
+  
+  try {
+    // Получаем embedding для запроса
+    const queryEmbeddings = await getEmbeddings([query]);
+    const queryEmbedding = queryEmbeddings[0];
+    
+    // Вычисляем сходство со всеми чанками
+    const similarities = [];
+    
+    for (const [chunkId, chunk] of documentChunks.entries()) {
+      if (chunk.embedding) {
+        const similarity = cosineSimilarity(queryEmbedding, chunk.embedding);
+        similarities.push({
+          chunkId,
+          text: chunk.text,
+          similarity,
+          docTitle: knowledgeBase.get(chunk.docId)?.title || 'Неизвестный документ',
+          metadata: chunk.metadata
+        });
+      }
+    }
+    
+    // Сортируем по убыванию сходства и берем топ-K
+    return similarities
+      .sort((a, b) => b.similarity - a.similarity)
+      .slice(0, topK)
+      .filter(item => item.similarity > 0.3); // Минимальный порог сходства
+      
+  } catch (error) {
+    console.error('Ошибка поиска в базе знаний:', error);
+    return [];
+  }
+}
 
 // Конфигурация по умолчанию
 const DEFAULT_CONFIG = {
@@ -864,9 +1011,27 @@ const SYSTEM_PROMPT = `Ты — онлайн-помощник главного �
 - НДС, УСН, налогу на прибыль
 - Трудовому законодательству для бухгалтеров
 
+БАЗА ЗНАНИЙ:
+У тебя есть доступ к базе корпоративных документов с актуальной информацией по бухучёту и налогообложению РФ. Если в контексте есть информация из базы знаний (помеченная как "Релевантная информация из базы знаний"), обязательно используй её для ответа. Эта информация проверена и актуальна.
+
+При использовании информации из базы знаний:
+- Ссылайся на источник: "Согласно нашим документам..." или "В базе знаний указано..."
+- Если информация из базы знаний противоречит твоим общим знаниям, приоритет у базы знаний
+- Сообщай, если информация неполная и требуется уточнение
+
 Если вопрос не по твоей специализации - вежливо направь к нужному специалисту.`;
 
-/* ================== API ROUTES ================== */
+// Endpoint для получения статуса RAG
+app.get('/api/rag/status', authRequired, (req, res) => {
+  res.json({
+    enabled: knowledgeBase.size > 0,
+    documentsCount: knowledgeBase.size,
+    chunksCount: documentChunks.size,
+    message: knowledgeBase.size > 0 
+      ? 'База знаний активна и используется в чате'
+      : 'База знаний пуста. Загрузите документы через админ-панель.'
+  });
+});
 
 // Загрузка файлов
 app.post('/api/upload', authRequired, trackUserActivity, upload.single('file'), async (req, res) => {
@@ -893,10 +1058,10 @@ app.post('/api/upload', authRequired, trackUserActivity, upload.single('file'), 
   }
 });
 
-// Обычный чат
+// Обычный чат с RAG
 app.post('/api/chat', authRequired, trackUserActivity, express.json(), async (req, res) => {
   try {
-    const { messages, attachmentId } = req.body || {};
+    const { messages, attachmentId, useRAG = true } = req.body || {};
     if (!Array.isArray(messages)) {
       return res.status(400).json({ error: 'messages must be an array' });
     }
@@ -907,7 +1072,30 @@ app.post('/api/chat', authRequired, trackUserActivity, express.json(), async (re
       attachmentNote = `\n\nВложенный текст (обезличенный, до 8k):\n${a.text}`;
     }
 
-    const systemPrompt = SYSTEM_PROMPT + attachmentNote;
+    // RAG: Поиск релевантной информации в базе знаний
+    let ragContext = '';
+    if (useRAG && knowledgeBase.size > 0) {
+      try {
+        // Берем последнее сообщение пользователя для поиска
+        const lastUserMessage = messages.filter(m => m.role === 'user').pop();
+        if (lastUserMessage?.content) {
+          const relevantChunks = await searchKnowledge(lastUserMessage.content, 3);
+          
+          if (relevantChunks.length > 0) {
+            ragContext = '\n\nРелевантная информация из базы знаний:\n';
+            relevantChunks.forEach((chunk, index) => {
+              ragContext += `\n[Источник ${index + 1}: ${chunk.docTitle}]\n${chunk.text}\n`;
+            });
+            ragContext += '\nИспользуйте эту информацию для более точного ответа, если она релевантна вопросу.\n';
+          }
+        }
+      } catch (error) {
+        console.error('Ошибка RAG поиска:', error);
+        // Продолжаем без RAG в случае ошибки
+      }
+    }
+
+    const systemPrompt = SYSTEM_PROMPT + attachmentNote + ragContext;
 
     const body = {
       model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
@@ -1406,7 +1594,215 @@ app.get('/api/user/status', authRequired, (req, res) => {
   });
 });
 
-// Здоровье
+/* ================== RAG API ENDPOINTS ================== */
+
+// Загрузка документа в базу знаний
+app.post('/api/knowledge/upload', adminRequired, upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'Файл не получен' });
+    }
+
+    const title = req.body.title || req.file.originalname;
+    const description = req.body.description || '';
+    
+    // Извлекаем текст из файла
+    const rawText = await extractTextFrom(req.file);
+    if (!rawText || rawText.trim().length < 100) {
+      return res.status(400).json({ error: 'Документ слишком короткий или не содержит текста' });
+    }
+
+    // Очищаем текст
+    const cleanText = rawText
+      .replace(/\r\n/g, '\n')
+      .replace(/\n+/g, '\n')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    // Разбиваем на чанки
+    const chunks = splitIntoChunks(cleanText, 800, 150);
+    
+    if (chunks.length === 0) {
+      return res.status(400).json({ error: 'Не удалось разбить документ на части' });
+    }
+
+    console.log(`Документ "${title}" разбит на ${chunks.length} частей`);
+
+    // Получаем embeddings для всех чанков (батчами по 10)
+    const batchSize = 10;
+    const allEmbeddings = [];
+    
+    for (let i = 0; i < chunks.length; i += batchSize) {
+      const batch = chunks.slice(i, i + batchSize);
+      console.log(`Получаем embeddings для частей ${i + 1}-${Math.min(i + batchSize, chunks.length)}`);
+      
+      try {
+        const batchEmbeddings = await getEmbeddings(batch);
+        allEmbeddings.push(...batchEmbeddings);
+        
+        // Небольшая пауза между батчами
+        await new Promise(resolve => setTimeout(resolve, 500));
+      } catch (error) {
+        console.error(`Ошибка получения embeddings для батча ${i}:`, error);
+        throw error;
+      }
+    }
+
+    // Создаем уникальный ID документа
+    const docId = Date.now().toString() + Math.random().toString(36).slice(2);
+    
+    // Сохраняем документ в базу знаний
+    knowledgeBase.set(docId, {
+      title,
+      description,
+      content: cleanText,
+      chunks: chunks.length,
+      uploadedAt: new Date().toISOString(),
+      uploadedBy: req.admin.email,
+      fileSize: req.file.size,
+      originalName: req.file.originalname
+    });
+
+    // Сохраняем чанки с embeddings
+    chunks.forEach((chunk, index) => {
+      const chunkId = `${docId}_${index}`;
+      documentChunks.set(chunkId, {
+        docId,
+        text: chunk,
+        embedding: allEmbeddings[index],
+        metadata: {
+          chunkIndex: index,
+          totalChunks: chunks.length
+        }
+      });
+    });
+
+    // Сохраняем данные
+    saveData();
+
+    console.log(`База знаний обновлена: ${knowledgeBase.size} документов, ${documentChunks.size} частей`);
+
+    res.json({
+      success: true,
+      docId,
+      title,
+      chunks: chunks.length,
+      message: 'Документ успешно добавлен в базу знаний'
+    });
+
+  } catch (error) {
+    console.error('Ошибка загрузки в базу знаний:', error);
+    res.status(500).json({ 
+      error: 'Ошибка обработки документа', 
+      details: error.message 
+    });
+  }
+});
+
+// Список документов в базе знаний
+app.get('/api/knowledge/list', adminRequired, (req, res) => {
+  const documents = [];
+  
+  for (const [docId, doc] of knowledgeBase.entries()) {
+    documents.push({
+      id: docId,
+      title: doc.title,
+      description: doc.description,
+      chunks: doc.chunks,
+      uploadedAt: doc.uploadedAt,
+      uploadedBy: doc.uploadedBy,
+      originalName: doc.originalName,
+      fileSize: doc.fileSize
+    });
+  }
+  
+  // Сортируем по дате загрузки (новые первыми)
+  documents.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt));
+  
+  res.json({
+    total: documents.length,
+    totalChunks: documentChunks.size,
+    documents
+  });
+});
+
+// Удаление документа из базы знаний
+app.delete('/api/knowledge/:docId', adminRequired, (req, res) => {
+  const { docId } = req.params;
+  
+  if (!knowledgeBase.has(docId)) {
+    return res.status(404).json({ error: 'Документ не найден' });
+  }
+  
+  // Удаляем все чанки документа
+  let deletedChunks = 0;
+  for (const [chunkId, chunk] of documentChunks.entries()) {
+    if (chunk.docId === docId) {
+      documentChunks.delete(chunkId);
+      deletedChunks++;
+    }
+  }
+  
+  // Удаляем сам документ
+  const doc = knowledgeBase.get(docId);
+  knowledgeBase.delete(docId);
+  
+  saveData();
+  
+  res.json({
+    success: true,
+    deletedDocument: doc.title,
+    deletedChunks,
+    message: 'Документ удален из базы знаний'
+  });
+});
+
+// Поиск в базе знаний (для тестирования)
+app.post('/api/knowledge/search', adminRequired, express.json(), async (req, res) => {
+  try {
+    const { query, topK = 5 } = req.body;
+    
+    if (!query || typeof query !== 'string') {
+      return res.status(400).json({ error: 'Требуется текст запроса' });
+    }
+    
+    const results = await searchKnowledge(query.trim(), topK);
+    
+    res.json({
+      query,
+      results: results.length,
+      data: results.map(result => ({
+        text: result.text.slice(0, 300) + (result.text.length > 300 ? '...' : ''),
+        similarity: Math.round(result.similarity * 1000) / 1000,
+        document: result.docTitle,
+        metadata: result.metadata
+      }))
+    });
+    
+  } catch (error) {
+    console.error('Ошибка поиска:', error);
+    res.status(500).json({ error: 'Ошибка выполнения поиска' });
+  }
+});
+
+// Статистика базы знаний
+app.get('/api/knowledge/stats', adminRequired, (req, res) => {
+  let totalFileSize = 0;
+  let totalContent = 0;
+  
+  for (const doc of knowledgeBase.values()) {
+    totalFileSize += doc.fileSize || 0;
+    totalContent += doc.content?.length || 0;
+  }
+  
+  res.json({
+    documents: knowledgeBase.size,
+    chunks: documentChunks.size,
+    totalFileSize,
+    totalContentLength: totalContent,
+    averageChunksPerDoc: knowledgeBase.size > 0 ? Math.round(documentChunks.size / knowledgeBase.size) : 0
+  });
+});
 app.get('/health', (req, res) => {
   res.json({ 
     ok: true, 
@@ -1482,6 +1878,10 @@ app.get('/register', (req, res) => {
 
 app.get('/admin', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'admin.html'));
+});
+
+app.get('/knowledge', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'knowledge.html'));
 });
 
 // 404 handler
