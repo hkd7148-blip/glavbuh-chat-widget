@@ -75,10 +75,10 @@ function loadData() {
         }
       }
       
-      console.log(`Данные загружены: ${accounts.size} аккаунтов, ${tokens.size} токенов, ${knowledgeBase.size} документов, ${documentChunks.size} частей`);
+      console.log(`Data loaded: ${accounts.size} accounts, ${tokens.size} tokens, ${knowledgeBase.size} docs, ${documentChunks.size} chunks`);
     }
   } catch (error) {
-    console.error('Ошибка загрузки данных:', error);
+    console.error('Error loading data:', error);
   }
 }
 
@@ -95,9 +95,9 @@ function saveData() {
     };
     
     fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
-    console.log(`Данные сохранены: ${accounts.size} аккаунтов, ${knowledgeBase.size} документов, ${documentChunks.size} частей`);
+    console.log(`Data saved: ${accounts.size} accounts, ${knowledgeBase.size} docs, ${documentChunks.size} chunks`);
   } catch (error) {
-    console.error('Ошибка сохранения данных:', error);
+    console.error('Error saving data:', error);
   }
 }
 
@@ -1310,7 +1310,7 @@ app.post('/api/register/verify', express.json(), (req, res) => {
     // Сохраняем данные сразу
     saveData();
     
-    console.log(`Новый пользователь зарегистрирован: ${email}, токен: ${token.slice(0, 8)}...`);
+    console.log(`New user registered: ${email}, token: ${token.slice(0, 8)}...`);
 
     return res.json({ ok: true, email, token, expiresAt });
   } catch (e) {
@@ -1360,15 +1360,15 @@ app.post('/api/create-admin', express.json(), async (req, res) => {
     // Сохраняем данные сразу
     saveData();
     
-    console.log(`Админ токен создан для: ${email}, токен: ${token.slice(0, 12)}...`);
+    console.log(`Admin token created for: ${email}, token: ${token.slice(0, 12)}...`);
 
     return res.json({ 
       ok: true, 
       email, 
       token, 
       expiresAt,
-      message: 'Админский токен создан',
-      instructions: `Используйте этот токен в заголовке x-gb-token или в админ-панели`
+      message: 'Admin token created',
+      instructions: `Use this token in x-gb-token header or admin panel`
     });
   } catch (e) {
     return res.status(400).json({ error: String(e.message || e) });
@@ -1626,7 +1626,7 @@ app.post('/api/knowledge/upload', adminRequired, upload.single('file'), async (r
       return res.status(400).json({ error: 'Не удалось разбить документ на части' });
     }
 
-    console.log(`Документ "${title}" разбит на ${chunks.length} частей`);
+    console.log(`Document processed: ${title} -> ${chunks.length} chunks`);
 
     // Получаем embeddings для всех чанков (батчами по 10)
     const batchSize = 10;
@@ -1634,7 +1634,7 @@ app.post('/api/knowledge/upload', adminRequired, upload.single('file'), async (r
     
     for (let i = 0; i < chunks.length; i += batchSize) {
       const batch = chunks.slice(i, i + batchSize);
-      console.log(`Получаем embeddings для частей ${i + 1}-${Math.min(i + batchSize, chunks.length)}`);
+      console.log(`Getting embeddings for chunks ${i + 1}-${Math.min(i + batchSize, chunks.length)}`);
       
       try {
         const batchEmbeddings = await getEmbeddings(batch);
@@ -1643,7 +1643,7 @@ app.post('/api/knowledge/upload', adminRequired, upload.single('file'), async (r
         // Небольшая пауза между батчами
         await new Promise(resolve => setTimeout(resolve, 500));
       } catch (error) {
-        console.error(`Ошибка получения embeddings для батча ${i}:`, error);
+        console.error(`Error getting embeddings for batch ${i}:`, error);
         throw error;
       }
     }
@@ -1680,20 +1680,20 @@ app.post('/api/knowledge/upload', adminRequired, upload.single('file'), async (r
     // Сохраняем данные
     saveData();
 
-    console.log(`База знаний обновлена: ${knowledgeBase.size} документов, ${documentChunks.size} частей`);
+    console.log(`Knowledge base updated: ${knowledgeBase.size} documents, ${documentChunks.size} chunks`);
 
     res.json({
       success: true,
       docId,
       title,
       chunks: chunks.length,
-      message: 'Документ успешно добавлен в базу знаний'
+      message: 'Document successfully added to knowledge base'
     });
 
   } catch (error) {
-    console.error('Ошибка загрузки в базу знаний:', error);
+    console.error('Knowledge base upload error:', error);
     res.status(500).json({ 
-      error: 'Ошибка обработки документа', 
+      error: 'Document processing error', 
       details: error.message 
     });
   }
@@ -1891,13 +1891,13 @@ app.use((req, res) => {
 
 /* ================== GRACEFUL SHUTDOWN ================== */
 process.on('SIGINT', () => {
-  console.log('Получен SIGINT, сохраняем данные...');
+  console.log('Received SIGINT, saving data...');
   saveData();
   process.exit(0);
 });
 
 process.on('SIGTERM', () => {
-  console.log('Получен SIGTERM, сохраняем данные...');
+  console.log('Received SIGTERM, saving data...');
   saveData();
   process.exit(0);
 });
@@ -1914,7 +1914,7 @@ process.on('unhandledRejection', (reason, promise) => {
   // Не завершаем процесс, просто логируем
 });
 
-/* ================== ЗАПУСК ================== */
+/* ================== SERVER START ================== */
 const PORT = process.env.PORT || 3000;
 const server = app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
