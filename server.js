@@ -209,7 +209,7 @@ async function getEmbeddings(texts, maxRetries = 5) {
         }
 
       } catch (error) {
-        if (error.message.includes('429') || error.message.includes('rate limit')) {
+        if (String(error.message || error).includes('429') || String(error).toLowerCase().includes('rate limit')) {
           const waitTime = Math.min(60000, 2000 * Math.pow(2, attempt)) + Math.random() * 1000;
           console.log(`Rate limit error, waiting ${Math.round(waitTime/1000)}s before retry ${attempt + 1}/${maxRetries}`);
           await new Promise(resolve => setTimeout(resolve, waitTime));
@@ -1101,7 +1101,10 @@ app.post('/api/chat', authRequired, trackUserActivity, async (req, res) => {
     let attachmentNote = '';
     if (attachmentId && attachments.has(attachmentId)) {
       const a = attachments.get(attachmentId);
-      attachmentNote = `\n\nВложенный текст (обезличенный, до 8k):\n${a.text}`;
+      attachmentNote = `
+
+Вложенный текст (обезличенный, до 8k):
+${a.text}`;
     }
 
     // RAG поиск
@@ -1202,7 +1205,10 @@ app.post('/api/chat_plus', authRequired, trackUserActivity, async (req, res) => 
     let attachmentNote = '';
     if (attachmentId && attachments.has(attachmentId)) {
       const a = attachments.get(attachmentId);
-      attachmentNote = `\n\nВложенный текст (обезличенный, до 8k):\n${a.text}`;
+      attachmentNote = `
+
+Вложенный текст (обезличенный, до 8k):
+${a.text}`;
     }
 
     const systemPrompt = SYSTEM_PROMPT + attachmentNote;
@@ -1700,67 +1706,20 @@ app.post('/api/knowledge/upload', adminRequired, upload.single('file'), async (r
   } catch (error) {
     console.error('Knowledge base upload error:', error);
     
-    if (error.message.includes('rate limit') || error.message.includes('429')) {
+    if (String(error.message || error).includes('rate limit') || String(error.message || error).includes('429')) {
       res.status(429).json({
         error: 'Rate limit exceeded',
         message: 'Превышен лимит запросов к OpenAI. Попробуйте позже или загружайте документы по одному.',
-        details: error.message,
+        details: String(error.message || error),
         suggestion: 'Подождите 1-2 минуты перед повторной попыткой'
       });
     } else {
       res.status(500).json({
         error: 'Document processing error',
         message: 'Ошибка при обработке документа',
-        details: error.message
+        details: String(error.message || error)
       });
     }
-  }
-});
-
-    const docId = Date.now().toString() + Math.random().toString(36).slice(2);
-
-    knowledgeBase.set(docId, {
-      title,
-      description,
-      content: cleanText,
-      chunks: chunks.length,
-      uploadedAt: new Date().toISOString(),
-      uploadedBy: req.admin.email,
-      fileSize: req.file.size,
-      originalName: req.file.originalname
-    });
-
-    chunks.forEach((chunk, index) => {
-      const chunkId = `${docId}_${index}`;
-      documentChunks.set(chunkId, {
-        docId,
-        text: chunk,
-        embedding: allEmbeddings[index],
-        metadata: {
-          chunkIndex: index,
-          totalChunks: chunks.length
-        }
-      });
-    });
-
-    saveData();
-
-    console.log(`Knowledge base updated: ${knowledgeBase.size} documents, ${documentChunks.size} chunks`);
-
-    res.json({
-      success: true,
-      docId,
-      title,
-      chunks: chunks.length,
-      message: 'Document successfully added to knowledge base'
-    });
-
-  } catch (error) {
-    console.error('Knowledge base upload error:', error);
-    res.status(500).json({
-      error: 'Document processing error',
-      details: error.message
-    });
   }
 });
 
