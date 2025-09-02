@@ -148,36 +148,84 @@ function splitIntoChunks(text, chunkSize = 1000, overlap = 200) {
   return chunks;
 }
 
-// Получение embeddings от OpenAI
-async function getEmbeddings(texts) {
+// Получение embeddings с retry логикой
+async function getEmbeddings(texts, maxRetries = 5) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     throw new Error('OPENAI_API_KEY не установлен');
   }
 
-  try {
-    const response = await fetch('https://api.openai.com/v1/embeddings', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: 'text-embedding-3-small',
-        input: Array.isArray(texts) ? texts : [texts]
-      })
-    });
+  const inputTexts = Array.isArray(texts) ? texts : [texts];
+  
+  // Определяем размер батча в зависимости от тарифа
+  const tier = process.env.OPENAI_TIER || 'free';
+  const batchSize = tier === 'free' ? 1 : (tier === 'tier-1' ? 10 : 20);
+  const delayBetweenRequests = tier === 'free' ? 20000 : (tier === 'tier-1' ? 1000 : 500);
+  
+  const results = [];
 
-    if (!response.ok) {
-      throw new Error(`OpenAI API Error: ${response.status}`);
+  for (let i = 0; i < inputTexts.length; i += batchSize) {
+    const batch = inputTexts.slice(i, i + batchSize);
+    
+    console.log(`Processing embedding batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(inputTexts.length/batchSize)}`);
+    
+    let attempt = 0;
+    let success = false;
+    
+    while (attempt < maxRetries && !success) {
+      try {
+        const response = await fetch('https://api.openai.com/v1/embeddings', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            model: 'text-embedding-3-small',
+            input: batch
+          })
+        });
+
+        if (response.status === 429) {
+          const waitTime = Math.min(60000, 1000 * Math.pow(2, attempt)) + Math.random() * 1000;
+          console.log(`Rate limit hit, waiting ${Math.round(waitTime/1000)}s before retry ${attempt + 1}/${maxRetries}`);
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+          attempt++;
+          continue;
+        }
+
+        if (!response.ok) {
+          const errorData = await response.text();
+          throw new Error(`OpenAI API Error: ${response.status} - ${errorData}`);
+        }
+
+        const data = await response.json();
+        results.push(...data.data.map(item => item.embedding));
+        success = true;
+
+        // Задержка между успешными запросами
+        if (i + batchSize < inputTexts.length) {
+          await new Promise(resolve => setTimeout(resolve, delayBetweenRequests));
+        }
+
+      } catch (error) {
+        if (error.message.includes('429') || error.message.includes('rate limit')) {
+          const waitTime = Math.min(60000, 2000 * Math.pow(2, attempt)) + Math.random() * 1000;
+          console.log(`Rate limit error, waiting ${Math.round(waitTime/1000)}s before retry ${attempt + 1}/${maxRetries}`);
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+          attempt++;
+        } else {
+          throw error;
+        }
+      }
     }
 
-    const data = await response.json();
-    return data.data.map(item => item.embedding);
-  } catch (error) {
-    console.error('Ошибка получения embeddings:', error);
-    throw error;
+    if (!success) {
+      throw new Error(`Failed to get embeddings after ${maxRetries} attempts due to rate limiting`);
+    }
   }
+
+  return results;
 }
 
 // Вычисление косинусного сходства
@@ -1586,6 +1634,8 @@ app.post('/api/knowledge/upload', adminRequired, upload.single('file'), async (r
     const title = req.body.title || req.file.originalname;
     const description = req.body.description || '';
 
+    console.log(`Starting document processing: ${title}`);
+
     const rawText = await extractTextFrom(req.file);
     if (!rawText || rawText.trim().length < 100) {
       return res.status(400).json({ error: 'Документ слишком короткий или не содержит текста' });
@@ -1603,24 +1653,69 @@ app.post('/api/knowledge/upload', adminRequired, upload.single('file'), async (r
       return res.status(400).json({ error: 'Не удалось разбить документ на части' });
     }
 
-    console.log(`Document processed: ${title} -> ${chunks.length} chunks`);
+    console.log(`Document chunked into ${chunks.length} parts`);
 
-    const batchSize = 10;
-    const allEmbeddings = [];
+    // Получаем embeddings с улучшенной retry логикой
+    console.log('Getting embeddings with rate limit handling...');
+    const allEmbeddings = await getEmbeddings(chunks);
 
-    for (let i = 0; i < chunks.length; i += batchSize) {
-      const batch = chunks.slice(i, i + batchSize);
-      console.log(`Getting embeddings for chunks ${i + 1}-${Math.min(i + batchSize, chunks.length)}`);
+    const docId = Date.now().toString() + Math.random().toString(36).slice(2);
 
-      try {
-        const batchEmbeddings = await getEmbeddings(batch);
-        allEmbeddings.push(...batchEmbeddings);
-        await new Promise(resolve => setTimeout(resolve, 500));
-      } catch (error) {
-        console.error(`Error getting embeddings for batch ${i}:`, error);
-        throw error;
-      }
+    knowledgeBase.set(docId, {
+      title,
+      description,
+      content: cleanText,
+      chunks: chunks.length,
+      uploadedAt: new Date().toISOString(),
+      uploadedBy: req.admin.email,
+      fileSize: req.file.size,
+      originalName: req.file.originalname
+    });
+
+    chunks.forEach((chunk, index) => {
+      const chunkId = `${docId}_${index}`;
+      documentChunks.set(chunkId, {
+        docId,
+        text: chunk,
+        embedding: allEmbeddings[index],
+        metadata: {
+          chunkIndex: index,
+          totalChunks: chunks.length
+        }
+      });
+    });
+
+    saveData();
+
+    console.log(`Knowledge base updated successfully: ${title}`);
+
+    res.json({
+      success: true,
+      docId,
+      title,
+      chunks: chunks.length,
+      message: 'Document successfully added to knowledge base'
+    });
+
+  } catch (error) {
+    console.error('Knowledge base upload error:', error);
+    
+    if (error.message.includes('rate limit') || error.message.includes('429')) {
+      res.status(429).json({
+        error: 'Rate limit exceeded',
+        message: 'Превышен лимит запросов к OpenAI. Попробуйте позже или загружайте документы по одному.',
+        details: error.message,
+        suggestion: 'Подождите 1-2 минуты перед повторной попыткой'
+      });
+    } else {
+      res.status(500).json({
+        error: 'Document processing error',
+        message: 'Ошибка при обработке документа',
+        details: error.message
+      });
     }
+  }
+});
 
     const docId = Date.now().toString() + Math.random().toString(36).slice(2);
 
