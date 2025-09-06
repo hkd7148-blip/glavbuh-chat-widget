@@ -13,11 +13,15 @@
     .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
     input{flex:1;min-width:220px;padding:10px;border:1px solid #e5e7eb;border-radius:10px}
     button{padding:10px 16px;border:0;border-radius:10px;background:#10B981;color:#fff;font-weight:700;cursor:pointer}
+    button:disabled{background:#9CA3AF;cursor:not-allowed}
     .msg{margin-top:10px;font-size:13px}
     .ok{color:#065f46}
     .err{color:#b91c1c}
+    .warn{color:#d97706}
     a{color:#0ea5a5;text-decoration:none}
     .hidden{display:none}
+    .warning-box{background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;padding:12px;margin:10px 0;font-size:13px}
+    .info-box{background:#dbeafe;border:1px solid #3b82f6;border-radius:8px;padding:12px;margin:10px 0;font-size:13px}
   </style>
 </head>
 <body>
@@ -66,12 +70,28 @@
     const emailEl = document.getElementById('email');
     const msg1 = document.getElementById('msg1');
     const msg2 = document.getElementById('msg2');
+    const sendCodeBtn = document.getElementById('sendCode');
+    const verifyBtn = document.getElementById('verify');
 
-    document.getElementById('sendCode').addEventListener('click', async () => {
+    // Функция для показа сообщений с разными типами
+    function showMessage(element, text, type = '') {
+      element.innerHTML = text;
+      element.className = 'msg ' + type;
+    }
+
+    // Функция для создания информационного блока
+    function createInfoBox(text, type = 'info') {
+      return `<div class="${type}-box">${text}</div>`;
+    }
+
+    sendCodeBtn.addEventListener('click', async () => {
       const name  = (nameEl.value || '').trim();
       const phone = (phoneEl.value || '').trim();
       const email = (emailEl.value || '').trim();
-      msg1.textContent = 'Отправляем код...'; msg1.className = 'msg';
+      
+      sendCodeBtn.disabled = true;
+      showMessage(msg1, 'Отправляем код...');
+      
       try {
         const r = await fetch('/api/register/init', {
           method:'POST',
@@ -79,21 +99,27 @@
           body: JSON.stringify({ name, phone, email })
         });
         const data = await r.json();
+        
         if (!r.ok || data.error) throw new Error(data.error || 'Ошибка');
-        msg1.textContent = 'Код отправлен на e-mail. Проверьте почту.';
-        msg1.className = 'msg ok';
+        
+        showMessage(msg1, 'Код отправлен на e-mail. Проверьте почту.', 'ok');
         s1.classList.add('hidden');
         s2.classList.remove('hidden');
+        
       } catch(e) {
-        msg1.textContent = 'Ошибка: ' + e.message;
-        msg1.className = 'msg err';
+        showMessage(msg1, 'Ошибка: ' + e.message, 'err');
+      } finally {
+        sendCodeBtn.disabled = false;
       }
     });
 
-    document.getElementById('verify').addEventListener('click', async () => {
+    verifyBtn.addEventListener('click', async () => {
       const email = (emailEl.value || '').trim();
       const code  = (document.getElementById('code').value || '').trim();
-      msg2.textContent = 'Проверяем...'; msg2.className = 'msg';
+      
+      verifyBtn.disabled = true;
+      showMessage(msg2, 'Проверяем...');
+      
       try {
         const r = await fetch('/api/register/verify', {
           method:'POST',
@@ -101,26 +127,106 @@
           body: JSON.stringify({ email, code })
         });
         const data = await r.json();
-        if (!r.ok || data.error) throw new Error(data.error || 'Ошибка');
-        // Сохраняем токен
-localStorage.setItem('gb_token', data.token);
-localStorage.setItem('gb_email', data.email);
-localStorage.setItem('gb_expires', String(data.expiresAt));
-
-// + СТАВИМ COOKIE, чтобы сервер пускал на /widget
-document.cookie = 'gb_token=' + encodeURIComponent(data.token) + '; Path=/; Max-Age=86400; SameSite=Lax';
-
+        
+        if (!r.ok || data.error) {
+          // Обработка разных типов ошибок
+          if (data.error === 'repeated_registration') {
+            let warningText = data.message;
+            
+            if (data.details === 'active_account') {
+              warningText += createInfoBox(
+                'Если вы забыли пароль или не можете войти, обратитесь в поддержку.', 
+                'info'
+              );
+            } else if (data.details === 'recent_registration') {
+              warningText += createInfoBox(
+                'Тестовый период предоставляется только один раз на email.<br>' +
+                'Для продления доступа обратитесь к администратору.', 
+                'warning'
+              );
+            }
+            
+            showMessage(msg2, warningText, 'warn');
+            
+            // Показываем дополнительную информацию
+            setTimeout(() => {
+              msg2.innerHTML += '<br><br>Нужна помощь? <a href="mailto:support@glavbuh-chat.ru">Написать в поддержку</a>';
+            }, 1000);
+            
+          } else {
+            throw new Error(data.error || 'Ошибка верификации');
+          }
+          return;
+        }
+        
+        // Успешная регистрация
+        // Сохраняем токен в localStorage
         localStorage.setItem('gb_token', data.token);
         localStorage.setItem('gb_email', data.email);
         localStorage.setItem('gb_expires', String(data.expiresAt));
-        msg2.innerHTML = 'Готово! Доступ активирован на 1 день.<br>Можно открыть <a href="/widget" target="_blank">чат</a>.';
-        msg2.className = 'msg ok';
+
+        // Устанавливаем cookie для серверной авторизации
+        const maxAge = Math.floor((data.expiresAt - Date.now()) / 1000);
+        document.cookie = `gb_token=${encodeURIComponent(data.token)}; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
+
+        showMessage(msg2, 
+          'Готово! Доступ активирован на 1 день.<br>' +
+          createInfoBox('Можете начать работу с <a href="/widget" target="_blank">онлайн-помощником</a>.', 'info'),
+          'ok'
+        );
+        
+        // Автоматический переход к чату через 3 секунды
+        setTimeout(() => {
+          if (confirm('Перейти к чату сейчас?')) {
+            window.open('/widget', '_blank');
+          }
+        }, 3000);
+        
       } catch(e) {
-        msg2.textContent = 'Ошибка: ' + e.message;
-        msg2.className = 'msg err';
+        showMessage(msg2, 'Ошибка: ' + e.message, 'err');
+      } finally {
+        verifyBtn.disabled = false;
+      }
+    });
+
+    // Обработка Enter в полях ввода
+    document.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') {
+        if (!s1.classList.contains('hidden')) {
+          sendCodeBtn.click();
+        } else if (!s2.classList.contains('hidden')) {
+          verifyBtn.click();
+        }
+      }
+    });
+
+    // Автоматическое форматирование номера телефона
+    phoneEl.addEventListener('input', (e) => {
+      let value = e.target.value.replace(/\D/g, '');
+      if (value.startsWith('8')) value = '7' + value.slice(1);
+      if (value.startsWith('7')) {
+        value = value.slice(0, 11);
+        const formatted = value.replace(/^7(\d{0,3})(\d{0,3})(\d{0,2})(\d{0,2})/, (match, p1, p2, p3, p4) => {
+          let result = '+7';
+          if (p1) result += ` (${p1}`;
+          if (p2) result += `) ${p2}`;
+          if (p3) result += `-${p3}`;
+          if (p4) result += `-${p4}`;
+          return result;
+        });
+        e.target.value = formatted;
+      }
+    });
+
+    // Валидация email в реальном времени
+    emailEl.addEventListener('blur', () => {
+      const email = emailEl.value.trim();
+      if (email && !email.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/)) {
+        emailEl.style.borderColor = '#ef4444';
+      } else {
+        emailEl.style.borderColor = '#e5e7eb';
       }
     });
   </script>
 </body>
 </html>
-
