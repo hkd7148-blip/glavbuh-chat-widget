@@ -29,6 +29,101 @@ const documentChunks = new Map();  // chunkId -> { docId, text, embedding, metad
 const userStats = new Map(); // email -> { registeredAt, lastActive, requestCount, isBlocked, blockReason }
 const adminUsers = new Set(['admin@glavbuh-chat.ru', 'glavbuh.chat@gmail.com']); // список админов
 
+/* ================== ЗАЩИТА ОТ ПОВТОРНЫХ РЕГИСТРАЦИЙ ================== */
+// Хранилище зарегистрированных email (добавить к существующим хранилищам)
+const registeredEmails = new Map(); // email -> { firstRegistration, totalRegistrations, lastAttempt }
+
+// Функция для проверки email на повторную регистрацию
+function checkEmailRegistrationHistory(email) {
+  const emailLower = email.toLowerCase().trim();
+
+  // Проверяем в текущих активных аккаунтах
+  if (accounts.has(emailLower)) {
+    return {
+      isRepeated: true,
+      reason: 'active_account',
+      message: 'У вас уже есть активный аккаунт. Войдите в систему или восстановите доступ.'
+    };
+  }
+
+  // Проверяем в истории регистраций
+  const history = registeredEmails.get(emailLower);
+  if (history) {
+    const now = Date.now();
+    const daysSinceFirst = (now - history.firstRegistration) / (1000 * 60 * 60 * 24);
+
+    // Если регистрировался менее 30 дней назад
+    if (daysSinceFirst < 30) {
+      return {
+        isRepeated: true,
+        reason: 'recent_registration',
+        message: `Вы уже регистрировались ${Math.ceil(daysSinceFirst)} дней назад. Тестовый период предоставляется только один раз.`,
+        firstRegistration: history.firstRegistration,
+        totalAttempts: history.totalRegistrations
+      };
+    }
+  }
+
+  return { isRepeated: false };
+}
+
+// Функция для записи регистрации email
+function recordEmailRegistration(email) {
+  const emailLower = email.toLowerCase().trim();
+  const now = Date.now();
+
+  const existing = registeredEmails.get(emailLower);
+  if (existing) {
+    // Обновляем существующую запись
+    existing.totalRegistrations++;
+    existing.lastAttempt = now;
+  } else {
+    // Создаем новую запись
+    registeredEmails.set(emailLower, {
+      firstRegistration: now,
+      totalRegistrations: 1,
+      lastAttempt: now
+    });
+  }
+
+  console.log(`Email registration recorded: ${emailLower} (total: ${registeredEmails.get(emailLower).totalRegistrations})`);
+}
+
+// Админская функция для просмотра истории регистраций
+function getEmailRegistrationStats() {
+  const stats = {
+    totalUniqueEmails: registeredEmails.size,
+    multipleRegistrations: 0,
+    recentRegistrations: 0,
+    emails: []
+  };
+
+  const now = Date.now();
+  const monthAgo = now - (30 * 24 * 60 * 60 * 1000);
+
+  for (const [email, history] of registeredEmails.entries()) {
+    if (history.totalRegistrations > 1) {
+      stats.multipleRegistrations++;
+    }
+
+    if (history.lastAttempt > monthAgo) {
+      stats.recentRegistrations++;
+    }
+
+    stats.emails.push({
+      email,
+      firstRegistration: new Date(history.firstRegistration).toLocaleDateString(),
+      totalRegistrations: history.totalRegistrations,
+      lastAttempt: new Date(history.lastAttempt).toLocaleDateString()
+    });
+  }
+
+  // Сортируем по количеству попыток регистрации
+  stats.emails.sort((a, b) => b.totalRegistrations - a.totalRegistrations);
+
+  return stats;
+}
+
 /* ================== ПОСТОЯННОЕ ХРАНЕНИЕ ================== */
 const DATA_FILE = path.join(__dirname, 'data.json');
 
@@ -73,6 +168,14 @@ function loadData() {
         }
       }
 
+      // Загрузка истории email
+      if (data.registeredEmails) {
+        for (const [email, history] of Object.entries(data.registeredEmails)) {
+          registeredEmails.set(email, history);
+        }
+        console.log(`Loaded ${registeredEmails.size} email registration records`);
+      }
+
       console.log(`Data loaded: ${accounts.size} accounts, ${tokens.size} tokens, ${knowledgeBase.size} docs, ${documentChunks.size} chunks`);
     }
   } catch (error) {
@@ -92,11 +195,12 @@ function saveData() {
       userStats: Object.fromEntries(userStats),
       knowledgeBase: Object.fromEntries(knowledgeBase),
       documentChunks: Object.fromEntries(documentChunks),
+      registeredEmails: Object.fromEntries(registeredEmails),
       savedAt: Date.now()
     };
 
     fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
-    console.log(`Data saved: ${accounts.size} accounts, ${knowledgeBase.size} docs, ${documentChunks.size} chunks`);
+    console.log(`Data saved: ${accounts.size} accounts, ${knowledgeBase.size} docs, ${documentChunks.size} chunks, emails: ${registeredEmails.size}`);
   } catch (error) {
     console.error('Error saving data:', error);
   }
@@ -156,22 +260,22 @@ async function getEmbeddings(texts, maxRetries = 5) {
   }
 
   const inputTexts = Array.isArray(texts) ? texts : [texts];
-  
+
   // Определяем размер батча в зависимости от тарифа
   const tier = process.env.OPENAI_TIER || 'free';
   const batchSize = tier === 'free' ? 1 : (tier === 'tier-1' ? 10 : 20);
   const delayBetweenRequests = tier === 'free' ? 20000 : (tier === 'tier-1' ? 1000 : 500);
-  
+
   const results = [];
 
   for (let i = 0; i < inputTexts.length; i += batchSize) {
     const batch = inputTexts.slice(i, i + batchSize);
-    
+
     console.log(`Processing embedding batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(inputTexts.length/batchSize)}`);
-    
+
     let attempt = 0;
     let success = false;
-    
+
     while (attempt < maxRetries && !success) {
       try {
         const response = await fetch('https://api.openai.com/v1/embeddings', {
@@ -680,6 +784,28 @@ function cleanupExpired() {
       }
     }
   }
+
+  // Очистка старых записей по email-регистрациям
+  cleanupOldEmailRecords();
+}
+
+// Функция очистки старых записей (вызывать в cleanupExpired)
+function cleanupOldEmailRecords() {
+  const now = Date.now();
+  const sixMonthsAgo = now - (180 * 24 * 60 * 60 * 1000); // 6 месяцев
+
+  let cleaned = 0;
+  for (const [email, history] of registeredEmails.entries()) {
+    // Удаляем записи старше 6 месяцев с одной попыткой регистрации
+    if (history.firstRegistration < sixMonthsAgo && history.totalRegistrations === 1) {
+      registeredEmails.delete(email);
+      cleaned++;
+    }
+  }
+
+  if (cleaned > 0) {
+    console.log(`Cleaned up ${cleaned} old email registration records`);
+  }
 }
 
 setInterval(cleanupExpired, 5 * 60 * 1000);
@@ -1028,6 +1154,12 @@ app.get('/api/admin/stats', adminRequired, (req, res) => {
   });
 });
 
+// Статистика регистраций email
+app.get('/api/admin/email-stats', adminRequired, (req, res) => {
+  const stats = getEmailRegistrationStats();
+  res.json(stats);
+});
+
 // Создаем системный промпт как константу для переиспользования
 const SYSTEM_PROMPT = `Ты — онлайн-помощник главного бухгалтера для РФ с именем "ГлавБух". Отвечай кратко и по делу, по-русски.
 
@@ -1276,6 +1408,17 @@ app.post('/api/register/init', async (req, res) => {
       return res.status(400).json({ error: 'Некорректный тип пользователя' });
     }
 
+    // Проверка истории регистраций (анти-дубль)
+    const repeatCheck = checkEmailRegistrationHistory(email);
+    if (repeatCheck.isRepeated) {
+      return res.status(429).json({
+        error: repeatCheck.reason,
+        message: repeatCheck.message,
+        firstRegistration: repeatCheck.firstRegistration || null,
+        totalAttempts: repeatCheck.totalAttempts || null
+      });
+    }
+
     const old = pending.get(email);
     if (old && Date.now() - (old.lastSentAt || 0) < 60000) {
       return res.status(429).json({ error: 'Код уже отправлен. Попробуйте через минуту.' });
@@ -1337,6 +1480,9 @@ app.post('/api/register/verify', (req, res) => {
       isBlocked: false,
       blockReason: null
     });
+
+    // Записываем успешную регистрацию в историю
+    recordEmailRegistration(email);
 
     saveData();
 
@@ -1468,6 +1614,17 @@ app.post('/api/quick-register', async (req, res) => {
     const name = 'Тестовый Пользователь';
     const phone = '+71234567890';
 
+    // Проверка истории регистраций (анти-дубль)
+    const repeatCheck = checkEmailRegistrationHistory(email);
+    if (repeatCheck.isRepeated) {
+      return res.status(429).json({
+        error: repeatCheck.reason,
+        message: repeatCheck.message,
+        firstRegistration: repeatCheck.firstRegistration || null,
+        totalAttempts: repeatCheck.totalAttempts || null
+      });
+    }
+
     if (accounts.has(email)) {
       const account = accounts.get(email);
       if (Date.now() < account.expiresAt) {
@@ -1495,6 +1652,9 @@ app.post('/api/quick-register', async (req, res) => {
       isBlocked: false,
       blockReason: null
     });
+
+    // Записываем успешную регистрацию в историю
+    recordEmailRegistration(email);
 
     saveData();
 
@@ -1705,7 +1865,7 @@ app.post('/api/knowledge/upload', adminRequired, upload.single('file'), async (r
 
   } catch (error) {
     console.error('Knowledge base upload error:', error);
-    
+
     if (String(error.message || error).includes('rate limit') || String(error.message || error).includes('429')) {
       res.status(429).json({
         error: 'Rate limit exceeded',
